@@ -20,7 +20,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
-from matplotlib.ticker import AutoMinorLocator, MaxNLocator, MultipleLocator
+from matplotlib.ticker import AutoMinorLocator, MaxNLocator, MultipleLocator, NullLocator
 from matplotlib.transforms import blended_transform_factory
 
 from figure_style import apply_mpl_style, css_font_stack, font_rcparams, validate_style_settings
@@ -68,6 +68,7 @@ class PlotOptions:
     show_legend: bool = True
     legend_loc: str = "best"
     color_axes: bool = True               # twin with one sample: axes in the colours of their curves
+    dta_au: bool = True                   # DTA in arbitrary units: "DTA (a.u.)", no tick values
     exo_arrow: bool = True
     exo_up: bool = True
     exo_loc: str = "upper right"
@@ -104,6 +105,8 @@ def auto_label(signal: str, curves: list[Curve], opts: PlotOptions, tg_mode: str
         return "Mass (%)" if tg_mode == "residual_pct" else "Mass change (%)"
     if signal == "dtg":
         return f"DTG ({_unit_markup(unit)})"
+    if opts.dta_au:
+        return "Heat flow (a.u.)" if unit.startswith("mW") else "DTA (a.u.)"
     if unit.startswith("mW"):
         return f"Heat flow ({_unit_markup(unit)})"
     return f"DTA ({_unit_markup(unit)})"
@@ -346,6 +349,10 @@ def render_mpl(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: str
             _style_axis(a, opts, style, x=not right, right=right or (opts.layout == "twin"))
             _y_limits(a, s, opts)
             a.set_ylabel(rich(label_of(s, curves, opts, tg_mode)))
+            if s == "dta" and opts.dta_au:
+                # Arbitrary units, as the intensity axis of XRD Maker: no tick marks or values.
+                a.yaxis.set_major_locator(NullLocator())
+                a.yaxis.set_minor_locator(NullLocator())
         if opts.layout == "twin":
             ax2.spines["right"].set_visible(True)
             if not style["axes_box"]:
@@ -512,6 +519,8 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
             kw["range"] = [lo, hi]
         if opts.layout == "twin" and s != "tg":
             kw.update(mirror=False)
+        if s == "dta" and opts.dta_au:
+            kw.update(showticklabels=False, ticks="", minor=dict(ticks=""))
         fig.update_yaxes(**kw, **where[s])
         if single and opts.color_axes and curves:
             color = curves[0].color if s == "tg" else (curves[0].color2 or curves[0].color)

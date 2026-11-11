@@ -72,7 +72,7 @@ SCHEMA = {
     "x_major": _num(0.0, 1e4), "x_minor": _bool,
     "tg_mode": _choice("change_pct", "residual_pct", "change_mg"),
     "tg_ref_on": _bool, "tg_ref_temp": _num(-200.0, 3000.0),
-    "dta_exo_positive": _bool, "exo_up": _bool, "dta_per_mass": _bool, "dta_zero": _bool,
+    "dta_exo_positive": _bool, "exo_up": _bool, "dta_per_mass": _bool, "dta_zero": _bool, "dta_au": _bool,
     "dta_smooth": _num(0, 201, True), "tg_smooth": _num(0, 201, True), "dtg_smooth": _num(5, 401, True),
     "dtg_basis": _choice("per_min", "per_K"),
     "y_tg_lo": _text, "y_tg_hi": _text, "y_dta_lo": _text, "y_dta_hi": _text, "y_dtg_lo": _text, "y_dtg_hi": _text,

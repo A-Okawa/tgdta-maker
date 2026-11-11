@@ -147,6 +147,17 @@ class Figures(unittest.TestCase):
         self.assertEqual(ax.lines[0].get_linewidth(), 0.9)
         plt.close(fig)
 
+    def test_dta_in_arbitrary_units_by_default(self):
+        fig, _ = render_mpl(self.curves()[:1], PlotOptions(), FIGAPP_STYLE)
+        dta_axis = fig.axes[1]
+        self.assertEqual(dta_axis.get_ylabel(), "DTA (a.u.)")
+        self.assertEqual(list(dta_axis.get_yticks()), [])
+        plt.close(fig)
+        fig, _ = render_mpl(self.curves()[:1], PlotOptions(dta_au=False), FIGAPP_STYLE)
+        self.assertEqual(fig.axes[1].get_ylabel(), "DTA (μV)")
+        self.assertTrue(len(fig.axes[1].get_yticks()))
+        plt.close(fig)
+
     def test_feature_rows(self):
         rows = feature_rows(self.curves(), PlotOptions(mass_ranges=[(25, 400)]))
         self.assertAlmostEqual(rows[0]["rate"], 15.0, delta=0.2)

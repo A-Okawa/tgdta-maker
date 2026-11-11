@@ -104,7 +104,7 @@ DEFAULTS = {
     "x_mode": "temp", "segment": "heating", "time_range": (0.0, 120.0),
     "x_auto": True, "x_min": 0.0, "x_max": 1300.0, "x_major": 0.0, "x_minor": True,
     "tg_mode": "change_pct", "tg_ref_on": False, "tg_ref_temp": 120.0,
-    "dta_exo_positive": True, "exo_up": True, "dta_per_mass": False, "dta_zero": False,
+    "dta_exo_positive": True, "exo_up": True, "dta_per_mass": False, "dta_zero": False, "dta_au": True,
     "dta_smooth": 0, "tg_smooth": 0, "dtg_smooth": 31, "dtg_basis": "per_min",
     "y_tg_lo": "", "y_tg_hi": "", "y_dta_lo": "", "y_dta_hi": "", "y_dtg_lo": "", "y_dtg_hi": "",
     "x_label": "", "tg_label": "", "dta_label": "", "dtg_label": "",
@@ -473,8 +473,13 @@ st.sidebar.selectbox(ui("TG の表し方", "TG as"), ["change_pct", "residual_pc
                      format_func=lambda v: {"change_pct": ui("質量変化 Δm/m₀ (%)・0 から", "Mass change Δm/m₀ (%), from 0"),
                                             "residual_pct": ui("残存質量 (%)・100 から", "Remaining mass (%), from 100"),
                                             "change_mg": ui("質量変化 Δm (mg)", "Mass change Δm (mg)")}[v],
-                     help=ui("% にするには、試料パネルで各試料の初期質量 m₀ (mg) を入れてください（データの TG 列は mg のため）。",
-                             "For %, enter each sample's initial mass m₀ (mg) in the sample panel (the TG column is in mg)."))
+                     help=ui("% にするには、すぐ下で各試料の初期質量 m₀ (mg) を入れてください（データの TG 列は mg のため）。",
+                             "For %, enter each sample's initial mass m₀ (mg) just below (the TG column is in mg)."))
+if measurements:
+    st.sidebar.caption(ui("初期質量 m₀ (mg)（0 = 未入力）。秤量した値を入れてください。", "Initial mass m₀ (mg) (0 = not entered): the weighed value."))
+    for i in measurements:
+        st.sidebar.number_input(f"m₀ · {os.path.splitext(names[i])[0]}", 0.0, 1e6, step=0.1, format="%.3f", key=f"mass_{i}",
+                                help=ui("TG を % で描くとき、DTA を質量で割るときに使います。", "Used for TG in % and DTA per mass."))
 st.sidebar.checkbox(ui("基準の温度で 0 にそろえる", "Zero at a reference temperature"), key="tg_ref_on",
                     help=ui("例：120 °C（吸着水を除いたあとの質量を基準にする）。オフなら描く区間の最初の点が基準です。",
                             "e.g. 120 °C (mass after adsorbed water is gone). Off: the first point of the drawn part."))
@@ -490,7 +495,11 @@ _dc[0].radio(ui("装置の発熱の符号", "Exotherm in the data"), [True, Fals
                      "Whether exothermic peaks are positive or negative in the data. Most TG-DTA instruments: positive."))
 _dc[1].radio(ui("図で発熱を", "Exotherm drawn"), [True, False], key="exo_up",
              format_func=lambda v: ui("上に", "Up") if v else ui("下に", "Down"))
-st.sidebar.checkbox(ui("試料の質量で割る (μV mg⁻¹)", "Divide by sample mass (μV mg⁻¹)"), key="dta_per_mass")
+st.sidebar.checkbox(ui("縦軸を a.u. にする（目盛りの数値なし）", "Arbitrary units (a.u., no tick values)"), key="dta_au",
+                    help=ui("「DTA (a.u.)」として目盛りの数値を出しません。外すと μV の数値と単位を出します。",
+                            "Labels the axis 'DTA (a.u.)' without tick values. Untick for values in μV."))
+if not st.session_state["dta_au"]:
+    st.sidebar.checkbox(ui("試料の質量で割る (μV mg⁻¹)", "Divide by sample mass (μV mg⁻¹)"), key="dta_per_mass")
 st.sidebar.checkbox(ui("始点を 0 にそろえる", "Start at 0"), key="dta_zero",
                     help=ui("各試料の DTA から描く区間の最初の値を引きます。重ねるときの縦の位置は試料パネルの「DTA の縦の位置」で。",
                             "Subtracts each curve's first value. Shift curves with 'DTA offset' in the sample panel."))
@@ -659,7 +668,7 @@ for i, m in measurements.items():
     try:
         processed[i] = process(
             m, time_range=time_ranges[i], tg_mode=state["tg_mode"], mass_mg=float(state.get(f"mass_{i}") or 0) or None,
-            tg_ref_temp=state["tg_ref_temp"] if state["tg_ref_on"] else None, dta_per_mass=state["dta_per_mass"],
+            tg_ref_temp=state["tg_ref_temp"] if state["tg_ref_on"] else None, dta_per_mass=state["dta_per_mass"] and not state["dta_au"],
             dta_flip=bool(state["dta_exo_positive"]) != bool(state["exo_up"]), dta_zero=state["dta_zero"],
             dta_smooth=state["dta_smooth"], tg_smooth=state["tg_smooth"], dtg_smooth=state["dtg_smooth"],
             dtg_basis=state["dtg_basis"])
@@ -668,7 +677,7 @@ for i, m in measurements.items():
 
 # Labels (empty = automatic; the automatic text is shown in the box as a hint).
 _probe = [Curve("", "#000000", p) for p in processed.values()]
-_probe_opts = PlotOptions(x_mode=state["x_mode"])
+_probe_opts = PlotOptions(x_mode=state["x_mode"], dta_au=state["dta_au"])
 for _s, _slot in _label_widgets.items():
     _auto = auto_label(_s, _probe, _probe_opts, state["tg_mode"]) if _probe else ""
     _slot.text_input({"x": ui("横軸", "x axis"), "tg": "TG", "dta": "DTA", "dtg": "DTG"}[_s], key=label_slots[_s],
@@ -717,9 +726,6 @@ else:
                     st.text_input(ui("凡例の名前", "Legend label"), key=f"lbl_{i}", help=_axis_help)
                     color_picker_popover(f"color_{i}", palette_colors(state["palette"], n_samples)[i % max(n_samples, 1)],
                                          n_samples)
-                    st.number_input(ui("初期質量 m₀ (mg)（0 = 未入力）", "Initial mass m₀ (mg) (0 = not entered)"), 0.0, 1e6,
-                                    step=0.1, format="%.3f", key=f"mass_{i}",
-                                    help=ui("TG を % で描くとき、DTA を質量で割るときに使います。", "Used for TG in % and DTA per mass."))
                     if "dta" in signals_shown:
                         st.number_input(ui("DTA の縦の位置（加える値）", "DTA offset (added)"), step=5.0, format="%.2f",
                                         key=f"dtaoff_{i}", help=ui("重ねた DTA を上下にずらします。", "Shifts overlaid DTA curves up or down."))
@@ -760,7 +766,7 @@ if measurements and col_graph is not None:
         labels={s: state.get(slot, "") for s, slot in label_slots.items()},
         font_size=state["font_size"], tick_font_size=state["tick_font_size"], legend_font_size=state["legend_font_size"],
         annotation_font_size=float(state["annotation_font_size"]), show_legend=state["show_legend"],
-        legend_loc=state["legend_loc"], color_axes=state["color_axes"], exo_arrow=state["exo_arrow"],
+        legend_loc=state["legend_loc"], color_axes=state["color_axes"], dta_au=state["dta_au"], exo_arrow=state["exo_arrow"],
         exo_up=bool(state["exo_up"]), exo_loc=state["exo_loc"], show_peaks=state["show_peaks"],
         peak_kind=state["peak_kind"], peak_prominence=float(state["peak_prom"]), peak_min_distance=float(state["peak_distance"]),
         peak_decimals=int(state["peak_decimals"]), mass_ranges=parse_ranges(state["mass_ranges"]),
@@ -774,7 +780,7 @@ if measurements and col_graph is not None:
     with col_graph:
         if no_mass:
             st.info(ui("初期質量 m₀ が未入力のため、TG を mg で描いています: ", "No initial mass m₀, so TG is drawn in mg: ")
-                    + ", ".join(no_mass) + ui("（試料パネルで入力すると % になります）", " (enter it in the sample panel for %)"))
+                    + ", ".join(no_mass) + ui("（サイドバーの「TG」で m₀ を入れると % になります）", " (enter m₀ under 'TG' in the sidebar for %)"))
         if no_mass_dta:
             st.info(ui("初期質量が未入力のため、DTA を質量で割っていません: ", "No initial mass, so DTA is not divided by mass: ")
                     + ", ".join(no_mass_dta))
