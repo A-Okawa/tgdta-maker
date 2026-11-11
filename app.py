@@ -13,6 +13,35 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+
+def _reload_own_modules():
+    """After an update (git push), Streamlit Cloud reruns the new app.py but keeps the app's own modules
+    imported by the old one, so new code would call old functions (TypeError on a new argument).
+    Reload them, in import order, whenever any of their files is not the one that was loaded."""
+    import hashlib
+    import importlib
+    import sys
+    names = ("figure_style", "palettes", "rich_text", "i18n", "project_io", "style_templates", "tgdta_io", "tgdta_plot")
+    app_dir = Path(__file__).resolve().parent
+
+    def digest(name):
+        try:
+            return hashlib.sha256((app_dir / f"{name}.py").read_bytes()).hexdigest()
+        except OSError:
+            return None
+    loaded = [sys.modules.get(n) for n in names]
+    if all(m is None or getattr(m, "_source_digest", None) == digest(n) for n, m in zip(names, loaded)):
+        return
+    for name, module in zip(names, loaded):
+        if module is not None:
+            module = importlib.reload(module)
+        else:
+            module = importlib.import_module(name)
+        module._source_digest = digest(name)
+
+
+_reload_own_modules()
+
 from figure_style import (
     FIGURE_PRESETS_MM, FONT_FAMILIES, METRIC_COMPATIBLE, STYLE_DEFAULTS, STYLE_KEYS, export_figure,
     inches_to_mm, mm_to_inches, resolve_font, validate_style_settings,
