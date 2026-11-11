@@ -412,3 +412,55 @@ def processed_table(name: str, p: Processed) -> str:
     for k in range(len(p.t)):
         writer.writerow([name] + [f"{c[k]:.6g}" for c in cols])
     return out.getvalue()
+
+
+def peak_onset(x: np.ndarray, y: np.ndarray, p: int, kind: str = "exo", window: float | None = None) -> dict | None:
+    """Extrapolated onset of a DTA peak (Tx of a crystallization peak): where the tangent at the steepest
+    point of the leading edge crosses the baseline extrapolated from before the peak (ISO 11357 / ASTM E794).
+
+    ``x`` must increase (a heating run); ``kind`` 'exo' for a maximum, 'endo' for a minimum.
+    ``window`` (x units) bounds the search around the peak; by default 10 % of the x span.
+    Returns the onset and the construction lines, or None when the peak has no clear leading edge.
+    """
+    from scipy.signal import peak_prominences, peak_widths
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if len(x) < 10 or not 0 < p < len(x) - 1 or x[-1] <= x[0]:
+        return None
+    # The recorded temperature repeats a value now and then (12.98, 12.98): use a smoothed, rising copy.
+    x = np.maximum.accumulate(smooth(x, 9)) + 1e-9 * np.arange(len(x))
+    s = 1.0 if kind == "exo" else -1.0
+    ys = s * y
+    step = float(np.median(np.diff(x)))
+    window = window or 0.1 * float(x[-1] - x[0])
+    wlen = max(5, int(2 * window / step) | 1)
+    prom = peak_prominences(ys, [p], wlen=wlen)
+    if prom[0][0] <= 0:
+        return None
+    # Foot of the peak: where the leading edge has risen 10 % of the (local) peak height.
+    foot_i = peak_widths(ys, [p], rel_height=0.9, prominence_data=prom)[2][0]
+    foot = float(np.interp(foot_i, np.arange(len(x)), x))
+    width = max(float(x[p]) - foot, 3 * step)
+    # Leading edge: the steepest point between the foot and the peak.
+    lo = int(np.searchsorted(x, foot))
+    if p - lo < 2:
+        return None
+    dxdi = np.maximum(np.gradient(smooth(x, 21)), 1e-12)
+    slope = np.gradient(smooth(ys, 5)) / dxdi
+    i = lo + int(np.argmax(slope[lo:p + 1]))
+    m = float(slope[i])
+    if m <= 0:
+        return None
+    # Baseline: straight line on the flat part well before the foot (5 to 2 foot-to-peak widths before it),
+    # clear of the slow rise that often precedes a crystallization peak.
+    base = (x >= foot - 5 * width) & (x <= foot - 2 * width)
+    if base.sum() < 3:
+        return None
+    a, b = np.polyfit(x[base], ys[base], 1)
+    if abs(a - m) < 1e-12:
+        return None
+    onset = (ys[i] - m * x[i] - b) / (a - m)
+    if not (foot - 3 * width <= onset <= x[p]):
+        return None
+    return {"x": float(onset), "y": float(s * (a * onset + b)), "x_inflection": float(x[i]), "y_inflection": float(y[i]),
+            "slope": s * m, "baseline": (s * float(a), s * float(b)), "x_base_start": float(x[base][0]),
+            "x_peak": float(x[p]), "y_peak": float(y[p])}

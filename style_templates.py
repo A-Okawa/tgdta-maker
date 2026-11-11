@@ -13,7 +13,7 @@ from project_io import ProjectError, clean_settings
 TEMPLATE_KEYS = frozenset(STYLE_KEYS) | {
     "fig_width", "fig_height", "dpi_export", "font_size", "tick_font_size", "legend_font_size",
     "annotation_font_size", "show_legend", "legend_loc", "x_minor", "panel_gap", "color_axes",
-    "exo_arrow", "exo_loc", "peak_decimals", "mass_decimals", "mass_lines", "twin_color2",
+    "exo_arrow", "exo_loc", "peak_decimals", "mirror_ticks", "onset_lines", "mass_decimals", "mass_lines", "twin_color2",
 }
 MAX_TEMPLATE_BYTES = 64 * 1024
 

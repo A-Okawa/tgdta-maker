@@ -20,7 +20,7 @@ from figure_style import STYLE_DEFAULTS, export_figure  # noqa: E402
 from project_io import ProjectError, clean_settings, decode_project, encode_project  # noqa: E402
 from style_templates import decode_style_template, encode_style_template  # noqa: E402
 from tgdta_io import (dta_peaks, guess_mapping, heating_rate, heating_segment, parse_markers, parse_ranges,  # noqa: E402
-                      process, processed_table, read_measurement)
+                      peak_onset, process, processed_table, read_measurement)
 from tgdta_plot import Curve, PlotOptions, feature_rows, render_mpl, render_plotly  # noqa: E402
 
 # The files XRD Maker, Raman Maker and UV-Vis-NIR Maker share. A change here must be copied to all apps.
@@ -106,6 +106,17 @@ class Processing(unittest.TestCase):
             self.assertTrue(any(abs(T - 1000) < 3 for T in exo), exo)
             self.assertTrue(any(abs(T - 150) < 8 for T in endo), endo)
 
+    def test_extrapolated_onset(self):
+        # Gaussian peak exp(-((T-1000)/8)^2): sigma = 8/sqrt(2), onset = 1000 - 2 sigma (tangent at the inflection).
+        p = process(read_measurement(synthetic_csv(), "a.csv"), time_range=(0, 82))
+        exo = [i for i, k in dta_peaks(p.T, p.dta, 0.1) if k == "exo"][0]
+        onset = peak_onset(p.T, p.dta, exo, "exo")
+        self.assertAlmostEqual(onset["x"], 1000 - 2 * 8 / np.sqrt(2), delta=0.5)
+        self.assertLess(onset["x"], onset["x_inflection"])
+        # Repeated temperature readings (as recorded) do not stop it.
+        T = np.round(p.T, 0)
+        self.assertAlmostEqual(peak_onset(T, p.dta, exo, "exo")["x"], onset["x"], delta=1.0)
+
     def test_text_inputs(self):
         self.assertEqual(parse_ranges("25-200, 200–800\n800 to 1200; x"), [(25, 200), (200, 800), (800, 1200)])
         self.assertEqual(parse_markers("1014 | cryst.\nfoo\n900"), [(1014.0, "cryst."), (900.0, "")])
@@ -126,15 +137,19 @@ class Figures(unittest.TestCase):
         cases = [PlotOptions(), PlotOptions(layout="twin", twin_right="dtg"),
                  PlotOptions(layout="stack", panels=("tg", "dtg", "dta"), show_peaks=True,
                              mass_ranges=[(25, 400)], markers=[(1000, "cryst.")]),
-                 PlotOptions(layout="stack", panels=("dta",), x_mode="time", exo_up=False, exo_loc="lower right")]
-        for opts in cases:
+                 PlotOptions(layout="stack", panels=("dta",), x_mode="time", exo_up=False, exo_loc="lower right",
+                             show_peaks=True, peak_mode="both"),
+                 PlotOptions(layout="stack", panels=("tg",), mirror_ticks=True),
+                 PlotOptions(show_peaks=True, peak_mode="onset", peak_kind="exo", mirror_ticks=True)]
+        for k, opts in enumerate(cases):
+            style = dict(FIGAPP_STYLE, axes_box=k >= 4)
             for subset in (curves[:1], curves):
-                fig, notes = render_mpl(subset, opts, FIGAPP_STYLE)
+                fig, notes = render_mpl(subset, opts, style)
                 self.assertEqual(notes, [])
                 for fmt in ("png", "pdf", "svg"):
-                    self.assertGreater(len(export_figure(fig, fmt, 150, style=FIGAPP_STYLE)), 1000)
+                    self.assertGreater(len(export_figure(fig, fmt, 150, style=style)), 1000)
                 plt.close(fig)
-                self.assertTrue(render_plotly(subset, opts, FIGAPP_STYLE).data)
+                self.assertTrue(render_plotly(subset, opts, style).data)
 
     def test_canvas_and_fonts_match_the_other_apps(self):
         fig, _ = render_mpl(self.curves()[:1], PlotOptions(), FIGAPP_STYLE)
@@ -156,6 +171,23 @@ class Figures(unittest.TestCase):
         fig, _ = render_mpl(self.curves()[:1], PlotOptions(dta_au=False), FIGAPP_STYLE)
         self.assertEqual(fig.axes[1].get_ylabel(), "DTA (μV)")
         self.assertTrue(len(fig.axes[1].get_yticks()))
+        plt.close(fig)
+
+    def test_onset_drawn_and_listed(self):
+        opts = PlotOptions(show_peaks=True, peak_mode="onset", peak_kind="exo")
+        fig, _ = render_mpl(self.curves()[:1], opts, FIGAPP_STYLE)
+        texts = [t.get_text() for t in fig.axes[1].texts]
+        self.assertTrue(any(t.startswith("$\\mathit{T}$") and "989 °C" in t for t in texts), texts)
+        plt.close(fig)
+        rows = feature_rows(self.curves()[:1], PlotOptions(peak_kind="both"))
+        self.assertTrue(any(abs(T - 988.7) < 1 and k == "exo" for T, k in rows[0]["onsets"]), rows[0]["onsets"])
+
+    def test_full_frame_and_mirrored_ticks(self):
+        fig, _ = render_mpl(self.curves()[:1], PlotOptions(layout="stack", panels=("tg",), mirror_ticks=True),
+                            dict(FIGAPP_STYLE, axes_box=True))
+        ax = fig.axes[0]
+        self.assertTrue(ax.spines["top"].get_visible() and ax.spines["right"].get_visible())
+        self.assertTrue(ax.xaxis.get_tick_params(which="major").get("top", ax.xaxis._major_tick_kw.get("tick2On")))
         plt.close(fig)
 
     def test_feature_rows(self):
@@ -225,9 +257,11 @@ class RunningApp(unittest.TestCase):
         at.run()
         self.assertFalse(at.exception)
         at.session_state["mass_0"], at.session_state["mass_1"] = 20.0, 20.0
-        for layout, lang in (("stack", "English"), ("twin", "Tiếng Việt"), ("stack", "ไทย")):
+        for layout, lang, mode in (("stack", "English", "both"), ("twin", "Tiếng Việt", "onset"), ("single", "ไทย", "peak"),
+                                   ("single", "日本語", "onset")):
             at.session_state["layout"], at.session_state["lang_radio"] = layout, lang
-            at.session_state["show_peaks"] = True
+            at.session_state["show_peaks"], at.session_state["peak_mode"] = True, mode
+            at.session_state["axes_box"], at.session_state["mirror_ticks"] = mode == "onset", True
             at.session_state["mass_ranges"] = "25-400"
             at.run()
             self.assertFalse(at.exception, (layout, lang))

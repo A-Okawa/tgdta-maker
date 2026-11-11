@@ -25,7 +25,7 @@ from matplotlib.transforms import blended_transform_factory
 
 from figure_style import apply_mpl_style, css_font_stack, font_rcparams, validate_style_settings
 from rich_text import plain, rich, to_html
-from tgdta_io import Processed, dta_peaks, mass_change, tg_at
+from tgdta_io import Processed, dta_peaks, mass_change, peak_onset, tg_at
 
 
 SIGNAL_ORDER = ("tg", "dtg", "dta")
@@ -77,6 +77,11 @@ class PlotOptions:
     peak_prominence: float = 0.1
     peak_min_distance: float = 30.0       # °C (or min) between peaks of the same kind
     peak_decimals: int = 0
+    peak_mode: str = "peak"               # peak | onset | both: DTA maximum, extrapolated onset (Tx), or both
+    onset_lines: bool = True              # draw the baseline and tangent that define the onset
+    onset_symbol_exo: str = "<i>T</i>_{x}"
+    onset_symbol_endo: str = ""
+    mirror_ticks: bool = False            # with the full frame: ticks on the top (and right) axes too
     mass_ranges: list = field(default_factory=list)  # [(lo °C, hi °C)]
     mass_decimals: int = 1
     mass_lines: bool = True
@@ -170,7 +175,11 @@ def _fmt_change(value: float, unit: str, decimals: int) -> str:
 
 
 def peak_list(c: Curve, opts: PlotOptions):
-    """[(x on the axis, y, temperature, kind)] of the DTA peaks of one curve within the x range."""
+    """[(x on the axis, y, temperature, kind, onset)] of the DTA peaks of one curve within the x range.
+
+    ``onset`` is the extrapolated onset (see tgdta_io.peak_onset) with its temperature under 'T',
+    or None when the peak has no clear leading edge.
+    """
     y = series(c, "dta")
     if y is None:
         return []
@@ -184,7 +193,25 @@ def peak_list(c: Curve, opts: PlotOptions):
         return []
     signed = y[idx] if opts.exo_up else -y[idx]
     found = dta_peaks(x[idx], signed, opts.peak_prominence, opts.peak_kind, opts.peak_min_distance)
-    return [(float(x[idx[k]]), float(y[idx[k]]), float(c.data.T[idx[k]]), kind) for k, kind in found]
+    out = []
+    for k, kind in found:
+        onset = None
+        if opts.peak_mode in ("onset", "both"):
+            # Onset on the drawn curve; exo is a maximum of the signed curve, so pass 'exo' and flip back.
+            onset = peak_onset(x[idx], signed, k, "exo" if kind == "exo" else "endo")
+            if onset is not None:
+                if not opts.exo_up:
+                    onset = {**onset, "y": -onset["y"], "y_inflection": -onset["y_inflection"], "slope": -onset["slope"],
+                             "baseline": tuple(-v for v in onset["baseline"]), "y_peak": -onset["y_peak"]}
+                onset["T"] = onset["x"] if opts.x_mode == "temp" else tg_at(c.data.t, c.data.T, onset["x"])
+        out.append((float(x[idx[k]]), float(y[idx[k]]), float(c.data.T[idx[k]]), kind, onset))
+    return out
+
+
+def onset_label(T: float, kind: str, opts: PlotOptions) -> str:
+    symbol = (opts.onset_symbol_exo if kind == "exo" else opts.onset_symbol_endo).strip()
+    text = _fmt_temp(T, opts.peak_decimals)
+    return f"{symbol} = {text}" if symbol else text
 
 
 def mass_list(c: Curve, opts: PlotOptions):
@@ -217,7 +244,9 @@ def feature_rows(curves: list[Curve], opts: PlotOptions) -> list[dict]:
         row = {"sample": plain(c.label), "rate": p.rate, "T_end": float(p.T[-1]) if len(p.T) else float("nan"),
                "tg_total": float(p.tg[-1] - p.tg[0]) if p.tg is not None and len(p.tg) else float("nan"),
                "tg_unit": p.tg_unit, "peaks": [], "steps": []}
-        row["peaks"] = [(T, kind) for _, _, T, kind in peak_list(c, opts)]
+        found = peak_list(c, PlotOptions(**{**opts.__dict__, "peak_mode": "both"}))
+        row["peaks"] = [(T, kind) for _, _, T, kind, _ in found]
+        row["onsets"] = [(o["T"], kind) for _, _, _, kind, o in found if o is not None]
         row["steps"] = [(lo, hi, d) for _, _, d, lo, hi in mass_list(c, opts)]
         rows.append(row)
     return rows
@@ -261,6 +290,12 @@ def _style_axis(ax, opts, style, *, x=True, right=False):
         ax.spines["top"].set_visible(False)
         if not right:
             ax.spines["right"].set_visible(False)
+    elif opts.mirror_ticks:
+        # Full frame with ticks on all sides; the right axis of a two-axis plot keeps its own ticks.
+        if x:
+            ax.tick_params(axis="x", which="both", top=True)
+        if not right:
+            ax.tick_params(axis="y", which="both", right=True)
 
 
 def _y_limits(ax, signal, opts):
@@ -396,11 +431,28 @@ def render_mpl(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: str
             a = axes["dta"]
             for c in curves:
                 color = c.color2 if single and c.color2 else c.color
-                for xp, yp, T, kind in peak_list(c, opts):
+                for xp, yp, T, kind, onset in peak_list(c, opts):
                     up = (kind == "exo") == opts.exo_up
-                    a.annotate(_fmt_temp(T, opts.peak_decimals), (xp, yp), xytext=(0, 2.5 if up else -2.5),
-                               textcoords="offset points", ha="center", va="bottom" if up else "top",
-                               fontsize=opts.annotation_font_size, color=color)
+                    if opts.peak_mode in ("peak", "both"):
+                        a.annotate(_fmt_temp(T, opts.peak_decimals), (xp, yp), xytext=(0, 2.5 if up else -2.5),
+                                   textcoords="offset points", ha="center", va="bottom" if up else "top",
+                                   fontsize=opts.annotation_font_size, color=color)
+                    if onset is None:
+                        continue
+                    if opts.onset_lines:
+                        # Baseline extended to the onset, and the tangent from the onset up the leading edge.
+                        ba, bb = onset["baseline"]
+                        xb = np.array([onset["x_base_start"], onset["x"]])
+                        a.plot(xb, ba * xb + bb, color=MARKER_COLOR, lw=0.5 * lw, ls=(0, (2, 1.5)), zorder=1.5)
+                        x_end = onset["x"] + (onset["y_peak"] - onset["y"]) / onset["slope"] * 0.85
+                        xt = np.array([onset["x"], x_end])
+                        a.plot(xt, onset["y"] + onset["slope"] * (xt - onset["x"]), color=MARKER_COLOR, lw=0.5 * lw,
+                               ls=(0, (2, 1.5)), zorder=1.5)
+                    a.plot([onset["x"]], [onset["y"]], marker="o", ms=2.2, mfc="white", mec=color, mew=0.6 * lw, zorder=3)
+                    a.annotate(rich(onset_label(onset["T"], kind, opts)), (onset["x"], onset["y"]),
+                               xytext=(-3, -3 if up else 3), textcoords="offset points", ha="right",
+                               va="top" if up else "bottom", fontsize=opts.annotation_font_size, color=color,
+                               bbox=dict(fc="white", ec="none", alpha=0.8, pad=0.4), zorder=4)
             if not any(v is not None for v in (opts.y_ranges.get("dta") or (None, None))):
                 a.margins(y=0.12)       # room for the temperatures above and below the peaks
 
@@ -482,10 +534,26 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
         xr, yr = refs["dta"]
         for c in curves:
             color = c.color2 if single and c.color2 else c.color
-            for xp, yp, T, kind in peak_list(c, opts):
+            for xp, yp, T, kind, onset in peak_list(c, opts):
                 up = (kind == "exo") == opts.exo_up
-                fig.add_annotation(x=xp, y=yp, xref=xr, yref=yr, text=_fmt_temp(T, opts.peak_decimals), showarrow=False,
-                                   yshift=7 if up else -7, font=dict(size=opts.annotation_font_size, color=color))
+                if opts.peak_mode in ("peak", "both"):
+                    fig.add_annotation(x=xp, y=yp, xref=xr, yref=yr, text=_fmt_temp(T, opts.peak_decimals), showarrow=False,
+                                       yshift=7 if up else -7, font=dict(size=opts.annotation_font_size, color=color))
+                if onset is None:
+                    continue
+                if opts.onset_lines:
+                    ba, bb = onset["baseline"]
+                    x_end = onset["x"] + (onset["y_peak"] - onset["y"]) / onset["slope"] * 0.85
+                    for xs, ys in (([onset["x_base_start"], onset["x"]], [ba * onset["x_base_start"] + bb, onset["y"]]),
+                                   ([onset["x"], x_end], [onset["y"], onset["y"] + onset["slope"] * (x_end - onset["x"])])):
+                        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", showlegend=False, hoverinfo="skip",
+                                                 line=dict(color=MARKER_COLOR, width=0.5 * lw, dash="dot")), **where["dta"])
+                fig.add_trace(go.Scatter(x=[onset["x"]], y=[onset["y"]], mode="markers", showlegend=False,
+                                         marker=dict(size=5, color="white", line=dict(color=color, width=1)),
+                                         hovertemplate=f"onset {onset['T']:.1f} °C<extra></extra>"), **where["dta"])
+                fig.add_annotation(x=onset["x"], y=onset["y"], xref=xr, yref=yr, text=to_html(onset_label(onset["T"], kind, opts)),
+                                   showarrow=False, xanchor="right", xshift=-4, yshift=-7 if up else 7,
+                                   font=dict(size=opts.annotation_font_size, color=color))
     if opts.exo_arrow and "dta" in signals:
         xr, yr = refs["dta"]
         left, top = "left" in opts.exo_loc, "upper" in opts.exo_loc
@@ -501,7 +569,8 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
 
     ticks = "outside" if style["tick_direction"] != "in" else "inside"
     tick_px = style["tick_length"] * 4 / 3
-    axis_common = dict(showline=True, linecolor="black", linewidth=style["axes_line_width"] * 4 / 3, mirror=style["axes_box"],
+    mirror = ("ticks" if opts.mirror_ticks else True) if style["axes_box"] else False
+    axis_common = dict(showline=True, linecolor="black", linewidth=style["axes_line_width"] * 4 / 3, mirror=mirror,
                        showgrid=False, zeroline=False, ticks=ticks, ticklen=tick_px,
                        tickfont=dict(color="black", size=opts.tick_font_size), title_font=dict(color="black", size=opts.font_size),
                        minor=dict(ticks=ticks, ticklen=tick_px / 2, showgrid=False))
@@ -517,8 +586,8 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
         kw = dict(title_text=to_html(label_of(s, curves, opts, tg_mode)))
         if lo is not None and hi is not None:
             kw["range"] = [lo, hi]
-        if opts.layout == "twin" and s != "tg":
-            kw.update(mirror=False)
+        if opts.layout == "twin":
+            kw.update(mirror=False)          # the right side belongs to the second axis
         if s == "dta" and opts.dta_au:
             kw.update(showticklabels=False, ticks="", minor=dict(ticks=""))
         fig.update_yaxes(**kw, **where[s])

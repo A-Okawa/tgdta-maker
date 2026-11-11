@@ -139,7 +139,8 @@ DEFAULTS = {
     "x_label": "", "tg_label": "", "dta_label": "", "dtg_label": "",
     "show_legend": True, "legend_loc": "best", "color_axes": True, "twin_color2": TWIN_COLOR2,
     "exo_arrow": True, "exo_loc": "upper right",
-    "show_peaks": False, "peak_kind": "both", "peak_prom": 0.1, "peak_distance": 30.0, "peak_decimals": 0,
+    "show_peaks": False, "peak_kind": "both", "single_signal": "dta", "mirror_ticks": False,
+    "peak_mode": "peak", "onset_lines": True, "onset_symbol_exo": "<i>T</i>_{x}", "onset_symbol_endo": "", "peak_prom": 0.1, "peak_distance": 30.0, "peak_decimals": 0,
     "mass_ranges": "", "mass_decimals": 1, "mass_lines": True, "markers": "", "panel_gap": 0.06,
     "palette": DEFAULT_PALETTE, "palette_reverse": False, "show_panel": True,
     "dpi_export": 600, "size_unit": "mm", "annotation_font_size": 6.0,
@@ -450,19 +451,26 @@ if st.session_state.pop("_recolor", False) or any(f"color_{i}" not in st.session
 
 # ===== サイドバー：グラフの設定 =====
 st.sidebar.header(ui("⚙️ グラフの設定", "⚙️ Graph settings"))
-st.sidebar.radio(ui("並べ方", "Layout"), ["twin", "stack"], key="layout", on_change=_layout_changed,
+st.sidebar.radio(ui("並べ方", "Layout"), ["twin", "stack", "single"], key="layout", on_change=_layout_changed,
                  format_func=lambda v: {"twin": ui("TG と DTA を左右の軸で 1 枚に", "TG and DTA on left and right axes"),
-                                        "stack": ui("上下のパネルに分ける", "Panels one above the other")}[v],
+                                        "stack": ui("上下のパネルに分ける", "Panels one above the other"),
+                                        "single": ui("1 つだけ（TG・DTG・DTA のどれか）", "One only (TG, DTG or DTA)")}[v],
                  help=ui("試料が 1 つなら左右の軸、複数を比べるなら上下のパネルが見やすい図になります。",
                          "Left/right axes suit one sample; panels one above the other suit comparing several."))
 if st.session_state["layout"] == "stack":
     _pc = st.sidebar.columns(3)
     for _col, _key, _label in zip(_pc, ("panel_tg", "panel_dtg", "panel_dta"), ("TG", "DTG", "DTA")):
         _col.checkbox(_label, key=_key)
+elif st.session_state["layout"] == "single":
+    st.sidebar.radio(ui("描くもの", "Draw"), ["tg", "dtg", "dta"], key="single_signal", horizontal=True,
+                     format_func=lambda v: v.upper(),
+                     help=ui("TG だけ、DTA だけの図にします。片方の列しかないデータもこれで描けます。",
+                             "A figure of TG only or DTA only; also for data with only one of the columns."))
 else:
     st.sidebar.radio(ui("右の軸", "Right axis"), ["dta", "dtg"], key="twin_right", horizontal=True,
                      format_func=lambda v: v.upper())
-st.sidebar.radio(ui("横軸", "x axis"), ["temp", "time"], key="x_mode", horizontal=True, on_change=_x_mode_changed,
+st.sidebar.subheader(ui("横軸", "x axis"))
+st.sidebar.radio(ui("横軸の量", "Quantity"), ["temp", "time"], key="x_mode", horizontal=True, on_change=_x_mode_changed,
                  format_func=lambda v: {"temp": ui("温度", "Temperature"), "time": ui("時間", "Time")}[v])
 st.sidebar.selectbox(ui("描く区間", "Part of the run"), ["heating", "all", "custom"], key="segment",
                      format_func=lambda v: {"heating": ui("昇温部だけ（自動）", "Heating ramp only (automatic)"),
@@ -492,10 +500,29 @@ _xt[0].number_input(ui("目盛りの間隔（0 = 自動）", "Tick spacing (0 = 
                     st.session_state["x_mode"] == "temp" else 10.0, format="%g", key="x_major")
 _xt[1].markdown('<div style="height:1.9rem"></div>', unsafe_allow_html=True)
 _xt[1].checkbox(ui("副目盛り", "Minor ticks"), key="x_minor")
+st.sidebar.caption(ui("横軸のラベルは下の「軸のラベル」で変えられます。", "Change the x-axis title under 'Axis labels' below."))
 
-signals_shown = shown_signals(PlotOptions(
-    layout=st.session_state["layout"], twin_right=st.session_state["twin_right"],
-    panels=tuple(s for s in ("tg", "dtg", "dta") if st.session_state[f"panel_{s}"])))
+st.sidebar.subheader(ui("枠と目盛り", "Frame and ticks"))
+_fc = st.sidebar.columns(2)
+_fc[0].checkbox(ui("枠線を全て描く", "Full frame"), key="axes_box",
+                help=ui("上と右の枠線も描きます。グラフ描画appの初期値は上と右なしです。",
+                        "Also draws the top and right lines. The graph app's default has neither."))
+if st.session_state["axes_box"]:
+    _fc[1].checkbox(ui("上・右にも目盛り", "Ticks on all sides"), key="mirror_ticks",
+                    help=ui("左右の軸の図では、右は DTA の軸なので上にだけ付けます。",
+                            "In the two-axis plot the right side is the DTA axis, so only the top gets ticks."))
+
+
+
+def layout_and_panels(state):
+    """'One only' is a stack of one panel."""
+    if state["layout"] == "single":
+        return "stack", (state["single_signal"],)
+    return state["layout"], tuple(s for s in ("tg", "dtg", "dta") if state[f"panel_{s}"])
+
+
+_layout, _panels = layout_and_panels(st.session_state)
+signals_shown = shown_signals(PlotOptions(layout=_layout, twin_right=st.session_state["twin_right"], panels=_panels))
 
 st.sidebar.subheader("TG")
 st.sidebar.selectbox(ui("TG の表し方", "TG as"), ["change_pct", "residual_pct", "change_mg"], key="tg_mode",
@@ -567,21 +594,38 @@ if st.session_state["layout"] == "twin":
                         key="color_axes", help=ui("左の軸を TG の色、右の軸を DTA の色にします（このとき凡例は出しません）。",
                                                   "Left axis in the TG colour, right axis in the DTA colour (no legend needed then)."))
 
-with st.sidebar.expander(ui("注記（Exo.・ピーク温度・質量変化・縦線）", "Annotations (Exo., peaks, mass change, lines)")):
+if "dta" in signals_shown:
+    st.sidebar.subheader(ui("DTA のピーク（Tp・Tx）", "DTA peaks (Tp, Tx)"))
+    st.sidebar.checkbox(ui("ピークの温度を書く", "Label peak temperatures"), key="show_peaks")
+    if st.session_state["show_peaks"]:
+        st.sidebar.radio(ui("書く温度", "Temperature"), ["peak", "onset", "both"], key="peak_mode",
+                         format_func=lambda v: {"peak": ui("ピークの頂点（Tp）", "Peak maximum (Tp)"),
+                                                "onset": ui("補外開始温度（Tx：接線とベースラインの交点）", "Extrapolated onset (Tx: tangent × baseline)"),
+                                                "both": ui("両方", "Both")}[v],
+                         help=ui("補外開始温度は、ピーク前のベースラインを延ばした直線と、立ち上がりの最も急な点（変曲点）での接線の交点です"
+                                 "（ISO 11357・ASTM E794 と同じ作図）。結晶化ピークなら Tx、融解なら融解開始温度に当たります。",
+                                 "The extrapolated onset is where the baseline before the peak, extended, meets the tangent at the steepest "
+                                 "point of the leading edge (inflection), the construction of ISO 11357 and ASTM E794. For crystallization it is Tx."))
+        st.sidebar.radio(ui("ピーク", "Peaks"), ["both", "exo", "endo"], key="peak_kind", horizontal=True,
+                         format_func=lambda v: {"both": ui("両方", "Both"), "exo": ui("発熱", "Exo"), "endo": ui("吸熱", "Endo")}[v])
+        if st.session_state["peak_mode"] != "peak":
+            _oc = st.sidebar.columns(2)
+            _oc[0].text_input(ui("発熱の記号", "Exo symbol"), key="onset_symbol_exo", help=_axis_help)
+            _oc[1].text_input(ui("吸熱の記号", "Endo symbol"), key="onset_symbol_endo",
+                              help=ui("空欄なら温度だけを書きます。例：`<i>T</i>_{m}`。", "Empty: the temperature only. e.g. `<i>T</i>_{m}`."))
+            st.sidebar.checkbox(ui("接線とベースラインを描く", "Draw the tangent and baseline"), key="onset_lines")
+        st.sidebar.slider(ui("ピーク検出の感度（曲線の振れ幅に対する割合）", "Peak prominence (fraction of the curve's range)"),
+                          0.01, 0.9, step=0.01, key="peak_prom", help=ui("小さいほど小さなピークも拾います。", "Smaller finds smaller peaks."))
+        _pk = st.sidebar.columns(2)
+        _pk[0].number_input(ui("ピーク同士の最小間隔", "Min. peak spacing"), 0.0, 1000.0, step=5.0, key="peak_distance",
+                            help=ui("横軸の単位（°C または min）。", "In x-axis units (°C or min)."))
+        _pk[1].number_input(ui("温度の小数の桁", "Decimals"), 0, 2, step=1, key="peak_decimals")
+
+with st.sidebar.expander(ui("注記（Exo.・質量変化・縦線）", "Annotations (Exo., mass change, lines)")):
     _ec = st.columns([0.45, 0.55])
     _ec[0].checkbox(ui("Exo. の矢印", "Exo. arrow"), key="exo_arrow")
     _ec[1].selectbox(ui("矢印の位置", "Arrow position"), CORNERS, key="exo_loc", format_func=corner_name,
                      label_visibility="collapsed")
-    st.checkbox(ui("DTA のピーク温度を書く", "Label DTA peak temperatures"), key="show_peaks")
-    if st.session_state["show_peaks"]:
-        st.radio(ui("ピーク", "Peaks"), ["both", "exo", "endo"], key="peak_kind", horizontal=True,
-                 format_func=lambda v: {"both": ui("両方", "Both"), "exo": ui("発熱", "Exo"), "endo": ui("吸熱", "Endo")}[v])
-        st.slider(ui("ピーク検出の感度（曲線の振れ幅に対する割合）", "Peak prominence (fraction of the curve's range)"),
-                  0.01, 0.9, step=0.01, key="peak_prom", help=ui("小さいほど小さなピークも拾います。", "Smaller finds smaller peaks."))
-        _pk = st.columns(2)
-        _pk[0].number_input(ui("ピーク同士の最小間隔", "Min. peak spacing"), 0.0, 1000.0, step=5.0, key="peak_distance",
-                            help=ui("横軸の単位（°C または min）。", "In x-axis units (°C or min)."))
-        _pk[1].number_input(ui("温度の小数の桁", "Decimals"), 0, 2, step=1, key="peak_decimals")
     st.text_input(ui("質量変化を書く温度範囲 (°C)", "Mass change over (°C)"), key="mass_ranges", placeholder="25-200, 200-800",
                   help=ui("範囲ごとに TG の変化（例：−5.0%）を曲線の下に書きます。カンマ区切り。点線で範囲の境目を示します。",
                           "Writes the TG change of each range (e.g. −5.0%) under the curve. Comma-separated; dotted lines mark the ranges."))
@@ -644,7 +688,6 @@ with st.sidebar.expander(ui("線・フォント・余白", "Lines, fonts and mar
     st.selectbox(ui("目盛りの向き", "Tick direction"), ["auto", "in", "out"], key="tick_direction",
                  format_func=lambda v: {"auto": ui("外向き（グラフ描画appと同じ）", "Outward (as the graph app)"),
                                         "in": ui("内向き", "Inward"), "out": ui("外向き", "Outward")}[v])
-    st.checkbox(ui("上と右の枠線を描く", "Draw the top and right frame"), key="axes_box")
     if st.session_state["layout"] == "stack":
         st.slider(ui("パネルの間隔", "Space between panels"), 0.0, 0.5, step=0.01, key="panel_gap")
     for _key, _label in (("margin_left", ui("左余白 (%)", "Left margin (%)")), ("margin_right", ui("右余白 (%)", "Right margin (%)")),
@@ -788,7 +831,7 @@ if measurements and col_graph is not None:
     if not state["x_auto"] and state["x_min"] < state["x_max"]:
         x_range = (float(state["x_min"]), float(state["x_max"]))
     opts = PlotOptions(
-        layout=state["layout"], panels=tuple(s for s in ("tg", "dtg", "dta") if state[f"panel_{s}"]),
+        layout=_layout, panels=_panels,
         twin_right=state["twin_right"], x_mode=state["x_mode"], x_range=x_range,
         x_major=float(state["x_major"]) or None, x_minor=state["x_minor"],
         y_ranges={s: (number_or_none(state.get(f"y_{s}_lo")), number_or_none(state.get(f"y_{s}_hi"))) for s in ("tg", "dta", "dtg")},
@@ -798,7 +841,9 @@ if measurements and col_graph is not None:
         legend_loc=state["legend_loc"], color_axes=state["color_axes"], dta_au=state["dta_au"], exo_arrow=state["exo_arrow"],
         exo_up=bool(state["exo_up"]), exo_loc=state["exo_loc"], show_peaks=state["show_peaks"],
         peak_kind=state["peak_kind"], peak_prominence=float(state["peak_prom"]), peak_min_distance=float(state["peak_distance"]),
-        peak_decimals=int(state["peak_decimals"]), mass_ranges=parse_ranges(state["mass_ranges"]),
+        peak_decimals=int(state["peak_decimals"]), peak_mode=state["peak_mode"], onset_lines=state["onset_lines"],
+        onset_symbol_exo=state["onset_symbol_exo"], onset_symbol_endo=state["onset_symbol_endo"],
+        mirror_ticks=bool(state["mirror_ticks"]) and bool(plot_style["axes_box"]), mass_ranges=parse_ranges(state["mass_ranges"]),
         mass_decimals=int(state["mass_decimals"]), mass_lines=state["mass_lines"], markers=parse_markers(state["markers"]),
         panel_gap=float(state["panel_gap"]), fig_width=state["fig_width"], fig_height=state["fig_height"],
     )
@@ -853,14 +898,16 @@ if measurements and col_graph is not None:
                     ui("全体の質量変化", "Total mass change"): f"{r['tg_total']:+.2f} {r['tg_unit']}".replace("-", "−"),
                     ui("発熱ピーク (°C)", "Exo peaks (°C)"): ", ".join(f"{T:.0f}" for T, k in r["peaks"] if k == "exo"),
                     ui("吸熱ピーク (°C)", "Endo peaks (°C)"): ", ".join(f"{T:.0f}" for T, k in r["peaks"] if k == "endo"),
+                    ui("発熱の補外開始 Tx (°C)", "Exo onset Tx (°C)"): ", ".join(f"{T:.1f}" for T, k in r["onsets"] if k == "exo"),
+                    ui("吸熱の補外開始 (°C)", "Endo onset (°C)"): ", ".join(f"{T:.1f}" for T, k in r["onsets"] if k == "endo"),
                     ui("範囲ごとの質量変化", "Mass change by range"): "; ".join(f"{lo:g}–{hi:g} °C: {d:+.2f}".replace("-", "−")
                                                                          for lo, hi, d in r["steps"]),
                 } for r in rows])
                 st.dataframe(table, hide_index=True, **FULL_WIDTH["dataframe"])
-                st.caption(ui("ピークは「注記」の感度・最小間隔で、描く区間・横軸の範囲の中から探します。温度は DTA が極大・極小になる点です"
-                              "（補外開始温度ではありません）。",
-                              "Peaks use the sensitivity and spacing under 'Annotations', within the drawn part and x range. "
-                              "Temperatures are the DTA maxima/minima (not extrapolated onsets)."))
+                st.caption(ui("ピークはサイドバー「DTA のピーク」の感度・最小間隔で、描く区間・横軸の範囲の中から探します。"
+                              "ピーク温度は DTA の極大・極小、補外開始温度は接線とベースラインの交点です。",
+                              "Peaks use the sensitivity and spacing under 'DTA peaks' in the sidebar, within the drawn part and x range. "
+                              "Peak temperatures are the DTA maxima/minima; onsets are where the tangent meets the baseline."))
                 csv_text = "".join(processed_table(plain(c.label), c.data) if k == 0 else
                                    processed_table(plain(c.label), c.data).split("\n", 1)[1] for k, c in enumerate(curves))
                 st.download_button(ui("📄 描いた値を CSV で保存", "📄 Save the drawn values (CSV)"), csv_text.encode("utf-8-sig"),
