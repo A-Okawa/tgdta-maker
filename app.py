@@ -398,8 +398,21 @@ def color_picker_popover(key: str, default_hex: str, n_items: int = 1, label=Non
     return st.session_state[key]
 
 
-# ===== サイドバー：作業ファイル =====
+# ===== サイドバー：生データ（最初に置く） =====
 st.sidebar.caption(f"Last updated: {APP_VERSION}")
+st.sidebar.header(ui("📂 TG-DTA データ", "📂 TG-DTA data"))
+st.sidebar.caption(ui("装置から書き出した CSV / TXT（時間・温度・DTA・TG の列）。Shift_JIS・UTF-8 のどちらでも読めます。複数ファイルで重ね描き。",
+                      "CSV / TXT exported by the instrument (time, temperature, DTA and TG columns), Shift_JIS or UTF-8. "
+                      "Several files are overlaid."))
+_upload_key = f"upload_{st.session_state.get('_epoch', 0)}"
+st.sidebar.file_uploader(ui("ファイルを選ぶ", "Choose files"), type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=True,
+                         key=_upload_key, on_change=_files_changed, args=(_upload_key,))
+if st.session_state.get("_upload_error"):
+    st.sidebar.error(ui("同じ名前のファイルがあります: ", "Files with the same name: ") + st.session_state["_upload_error"])
+if st.session_state["_files"] and not st.session_state.get(_upload_key):
+    st.sidebar.caption(ui("作業ファイルのデータ: ", "Data from the project: ") + ", ".join(sample_names()))
+
+# ===== サイドバー：作業ファイル =====
 st.sidebar.header(ui("💾 作業ファイル", "💾 Project"))
 st.sidebar.caption(ui("測定データ・試料の設定・図の設定をまとめて保存し、あとで開けます。",
                       "Save measurements, sample settings and figure settings together and open them later."))
@@ -414,18 +427,6 @@ if LOCAL_DATA_DIR and (LOCAL_DATA_DIR / "autosave.json").is_file() and not st.se
                       **FULL_WIDTH["button"])
 st.sidebar.button(ui("新しく始める", "Start a new project"), on_click=_new_project, **FULL_WIDTH["button"])
 autosave_status = st.sidebar.empty()
-
-st.sidebar.header(ui("📂 TG-DTA データ", "📂 TG-DTA data"))
-st.sidebar.caption(ui("装置から書き出した CSV / TXT（時間・温度・DTA・TG の列）。Shift_JIS・UTF-8 のどちらでも読めます。複数ファイルで重ね描き。",
-                      "CSV / TXT exported by the instrument (time, temperature, DTA and TG columns), Shift_JIS or UTF-8. "
-                      "Several files are overlaid."))
-_upload_key = f"upload_{st.session_state.get('_epoch', 0)}"
-st.sidebar.file_uploader(ui("ファイルを選ぶ", "Choose files"), type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=True,
-                         key=_upload_key, on_change=_files_changed, args=(_upload_key,))
-if st.session_state.get("_upload_error"):
-    st.sidebar.error(ui("同じ名前のファイルがあります: ", "Files with the same name: ") + st.session_state["_upload_error"])
-if st.session_state["_files"] and not st.session_state.get(_upload_key):
-    st.sidebar.caption(ui("作業ファイルのデータ: ", "Data from the project: ") + ", ".join(sample_names()))
 
 # ===== 測定データの読み込み =====
 names = sample_names()
