@@ -401,9 +401,10 @@ def color_picker_popover(key: str, default_hex: str, n_items: int = 1, label=Non
 # ===== サイドバー：生データ（最初に置く） =====
 st.sidebar.caption(f"Last updated: {APP_VERSION}")
 st.sidebar.header(ui("📂 TG-DTA データ", "📂 TG-DTA data"))
-st.sidebar.caption(ui("装置から書き出した CSV / TXT（時間・温度・DTA・TG の列）。Shift_JIS・UTF-8 のどちらでも読めます。複数ファイルで重ね描き。",
-                      "CSV / TXT exported by the instrument (time, temperature, DTA and TG columns), Shift_JIS or UTF-8. "
-                      "Several files are overlaid."))
+st.sidebar.caption(ui("装置から書き出した CSV / TXT（時間・温度・DTA・TG の列、Shift_JIS・UTF-8）と、"
+                      "リガク ThermoPlus EVO の測定ファイル（.MES）・その Excel 出力（.xlsx）。複数ファイルで重ね描き。",
+                      "CSV / TXT exported by the instrument (time, temperature, DTA and TG columns; Shift_JIS or UTF-8), and "
+                      "Rigaku ThermoPlus EVO measurement files (.MES) or their Excel export (.xlsx). Several files are overlaid."))
 _upload_key = f"upload_{st.session_state.get('_epoch', 0)}"
 st.sidebar.file_uploader(ui("ファイルを選ぶ", "Choose files"), type=list(SUPPORTED_EXTENSIONS), accept_multiple_files=True,
                          key=_upload_key, on_change=_files_changed, args=(_upload_key,))
@@ -441,11 +442,17 @@ for i, name in enumerate(names):
         read_errors.append(f"{name}: {exc}")
 for _error in read_errors:
     st.error(ui("読み込めません — ", "Cannot read — ") + _error)
+for i, m in measurements.items():
+    if "mes_time_assumed" in m.notes:
+        st.warning(ui("{n}: 測定時間の範囲が見つからないため、1 秒ごとの記録として時間を作りました。横軸を時間にするときは確かめてください。",
+                      "{n}: the time range was not found, so 1 s sampling is assumed. Check it before plotting against time.")
+                   .format(n=names[i]))
 for i in measurements:
     st.session_state.setdefault(f"vis_{i}", True)
     st.session_state.setdefault(f"ord_{i}", i + 1)
     st.session_state.setdefault(f"lbl_{i}", os.path.splitext(names[i])[0])
-    st.session_state.setdefault(f"mass_{i}", 0.0)
+    # The sample mass written in the file (Rigaku's "Weight") fills m₀ until the user changes it.
+    st.session_state.setdefault(f"mass_{i}", float(measurements[i].mass_mg or 0.0))
     st.session_state.setdefault(f"dtaoff_{i}", 0.0)
 if st.session_state.pop("_recolor", False) or any(f"color_{i}" not in st.session_state for i in measurements):
     _apply_palette()
@@ -537,6 +544,9 @@ if measurements:
     for i in measurements:
         st.sidebar.number_input(f"m₀ · {os.path.splitext(names[i])[0]}", 0.0, 1e6, step=0.1, format="%.3f", key=f"mass_{i}",
                                 help=ui("TG を % で描くとき、DTA を質量で割るときに使います。", "Used for TG in % and DTA per mass."))
+        if measurements[i].mass_mg:
+            st.sidebar.caption(ui("ファイルに書かれた質量: {m:g} mg", "Mass written in the file: {m:g} mg").format(
+                m=measurements[i].mass_mg))
 st.sidebar.checkbox(ui("基準の温度で 0 にそろえる", "Zero at a reference temperature"), key="tg_ref_on",
                     help=ui("例：120 °C（吸着水を除いたあとの質量を基準にする）。オフなら描く区間の最初の点が基準です。",
                             "e.g. 120 °C (mass after adsorbed water is gone). Off: the first point of the drawn part."))
@@ -759,8 +769,8 @@ for _s, _slot in _label_widgets.items():
 # ===== メイン：試料パネル =====
 show_panel = st.toggle(ui("試料の設定パネルを表示", "Show the sample panel"), key="show_panel")
 if not measurements:
-    st.info(ui("左のサイドバーから TG-DTA のファイル（CSV / TXT）をアップロードしてください。",
-               "Upload TG-DTA files (CSV / TXT) in the sidebar."))
+    st.info(ui("左のサイドバーから TG-DTA のファイル（CSV / TXT・リガクの .MES / .xlsx）をアップロードしてください。",
+               "Upload TG-DTA files (CSV / TXT, Rigaku .MES / .xlsx) in the sidebar."))
     with st.expander(ui("読み込めるファイルの形", "File format")):
         st.code("Time(min),TEMP（℃）,DTA(μV),TG(mg),\n0.000000, 12.970000, 8.686500, 0.000200,\n0.050000, 12.980000, 8.683000, 0.000200,\n…",
                 language="text")
@@ -768,6 +778,10 @@ if not measurements:
                       "時間は min または s、温度は °C または K、TG は mg または %、DTA は μV（DSC の mW も可）。",
                       "Time, temperature, DTA and TG are found from the column names; otherwise choose them under 'Columns' "
                       "in the sample panel. Time in min or s, temperature in °C or K, TG in mg or %, DTA in μV (DSC mW also)."))
+        st.caption(ui("リガク ThermoPlus EVO の .MES はそのまま読めます（温度・TG・DTA と試料の質量）。ファイル内に時間の列はないので、"
+                      "測定時間の範囲を点数で割って時間を作ります。Excel 出力（.xlsx）や TPASCII のテキスト出力も読めます。",
+                      "Rigaku ThermoPlus EVO .MES files open directly (temperature, TG, DTA and the sample mass). They hold no time "
+                      "column, so time is the measured time range divided over the points. Their Excel (.xlsx) and TPASCII text exports also open."))
     col_graph = None
 else:
     if show_panel:

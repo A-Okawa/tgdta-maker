@@ -4,6 +4,7 @@ The data are synthetic (Shift_JIS, the instrument's column names), so the tests 
 """
 import ast
 import hashlib
+import struct
 import json
 import sys
 import unittest
@@ -71,6 +72,69 @@ class Reading(unittest.TestCase):
         lo, hi = heating_segment(t, T)
         self.assertEqual(lo, 0.0)
         self.assertAlmostEqual(hi, (1260 - 20) / 15, delta=0.5)
+
+
+def synthetic_rigaku_xlsx() -> bytes:
+    """Rigaku's Excel export: conditions on Sheet1 (Weight), TPASCII2 records with '#GD' data rows on Sheet2."""
+    import io as _io
+    import openpyxl
+    book = openpyxl.Workbook()
+    info = book.active
+    info.append([None, "NickName:", "Left EVO2G-TG", None, "Atmosphere:", "air"])
+    info.append([None, "Weight:", "  20.262mg", None, "Operator:", "x"])
+    data = book.create_sheet("Sheet2")
+    data.append(["TPASCII2", "ASCIIVERSION", "VERSION"])
+    data.append(["#IY", 1, "Temp.", 1, 255, "Solid Lines", "deg C", 0, 1400])
+    data.append([None, "Time(min)", "Temp.(deg C)", "TG(mg)", "DTA(uV)"])
+    for k in range(600):
+        T = 30 + 10 * k / 60
+        data.append(["#GD", k / 60, T, -0.002 * k / 60, 20 * np.exp(-((T - 100) / 3) ** 2)])
+    data.append(["#ME"])
+    out = _io.BytesIO()
+    book.save(out)
+    return out.getvalue()
+
+
+def synthetic_rigaku_mes(n=600, dt_s=1.0, mass=20.262) -> bytes:
+    """A Rigaku ThermoPlus EVO .MES in the layout read by tgdta_io: series = 64-byte header (type code
+    60 bytes before the count) + int32 count + float32 values; x-axis record [t0][t1][6][T min][T max]."""
+    t = np.arange(n) * dt_s / 60
+    T = (30 + 10 * t).astype(np.float32)
+    tg = (-0.002 * t).astype(np.float32)
+    dta = (20 * np.exp(-((T - 100) / 3) ** 2)).astype(np.float32)
+    out = bytearray(b"ThermoPlusE\x00\x01\x00\x01\x00TPE MeasFile Version 3.09" + bytes(200))
+    out += struct.pack("<ffiff", 0.0, float(np.float32(t[-1])), 6, float(T.min()), float(T.max())) + bytes(40)
+    for code, values in ((1, T), (3, tg), (5, dta)):
+        out += struct.pack("<ii", code, 1) + bytes(52) + struct.pack("<i", n) + values.tobytes() + bytes(16)
+    out += b"\x02\x00\xb6\x01" + struct.pack("<f", mass) + b"Pt\x00\x00" + bytes(64)
+    return bytes(out)
+
+
+class Rigaku(unittest.TestCase):
+    def test_excel_export(self):
+        m = read_measurement(synthetic_rigaku_xlsx(), "a.xlsx")
+        self.assertEqual((m.source, m.mass_mg), ("xlsx", 20.262))
+        self.assertEqual(m.columns, ["Time(min)", "Temp.(deg C)", "TG(mg)", "DTA(uV)"])
+        self.assertEqual(m.mapping, {"time": 0, "temp": 1, "dta": 3, "tg": 2})
+        self.assertEqual(m.data.shape, (600, 4))
+        self.assertAlmostEqual(heating_rate(m.time_min(), m.column("temp")), 10.0, delta=0.05)
+
+    def test_measurement_file(self):
+        m = read_measurement(synthetic_rigaku_mes(), "a.MES")
+        self.assertEqual((m.source, m.mass_mg, m.notes), ("rigaku-mes", 20.262, []))
+        self.assertEqual(m.mapping, {"time": 0, "temp": 1, "dta": 3, "tg": 2})
+        self.assertAlmostEqual(float(m.time_min()[1]), 1 / 60, places=6)
+        self.assertAlmostEqual(heating_rate(m.time_min(), m.column("temp")), 10.0, delta=0.05)
+        p = process(m, mass_mg=m.mass_mg)
+        self.assertEqual(p.tg_unit, "%")
+        two_s = read_measurement(synthetic_rigaku_mes(dt_s=2.0), "b.MES")
+        self.assertAlmostEqual(float(two_s.time_min()[1]), 2 / 60, places=5)
+
+    def test_text_export_with_tags(self):
+        text = "Weight:\t20.262mg\n\tTime(min)\tTemp.(deg C)\tTG(mg)\tDTA(uV)\n" + "\n".join(
+            f"#GD\t{k / 60}\t{30 + k / 6}\t{-k * 1e-4}\t{k % 5}" for k in range(50)) + "\n#ME\n"
+        m = read_measurement(text.encode("cp932"), "a.txt")
+        self.assertEqual((m.mass_mg, m.data.shape), (20.262, (50, 4)))
 
 
 class Processing(unittest.TestCase):

@@ -18,7 +18,7 @@ import webbrowser
 
 
 APP_DIR = Path(__file__).resolve().parent
-REQUIRED_MODULES = ("streamlit", "numpy", "pandas", "matplotlib", "scipy", "plotly")
+REQUIRED_MODULES = ("streamlit", "numpy", "pandas", "matplotlib", "scipy", "plotly", "openpyxl")
 
 
 def default_data_dir() -> Path:

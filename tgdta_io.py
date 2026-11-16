@@ -19,6 +19,7 @@ import csv
 import io
 import math
 import re
+import struct
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -26,7 +27,7 @@ import numpy as np
 from scipy.signal import find_peaks, savgol_filter
 
 
-SUPPORTED_EXTENSIONS = ("csv", "txt", "tsv", "dat")
+SUPPORTED_EXTENSIONS = ("csv", "txt", "tsv", "dat", "xlsx", "mes")
 SIGNALS = ("time", "temp", "dta", "tg")
 MAX_FILE_BYTES = 40 * 1024 * 1024
 
@@ -43,6 +44,9 @@ class Measurement:
     data: np.ndarray                      # rows × columns, float
     mapping: dict[str, int | None]        # signal → column index
     units: dict[str, str] = field(default_factory=dict)
+    mass_mg: float | None = None          # sample mass written in the file (Rigaku: "Weight"), if any
+    source: str = "text"                  # text | xlsx | rigaku-mes
+    notes: list[str] = field(default_factory=list)
 
     def column(self, signal: str) -> np.ndarray | None:
         index = self.mapping.get(signal)
@@ -138,24 +142,24 @@ def _split(line: str, delimiter: str | None) -> list[str]:
     return next(csv.reader([line], delimiter=delimiter))
 
 
-def read_measurement(raw: bytes, name: str = "", mapping: dict | None = None) -> Measurement:
-    """Parse one exported table. ``mapping`` (signal → column index) overrides the automatic choice."""
-    if len(raw) > MAX_FILE_BYTES:
-        raise TGDTAParseError("The file is larger than 40 MB.")
-    text = decode_text(raw)
-    lines = [line.rstrip("\r\n") for line in text.splitlines()]
-    lines = [line for line in lines if line.strip()]
-    if not lines:
-        raise TGDTAParseError("The file is empty.")
+_TAG = re.compile(r"#[A-Za-z]{1,4}$")          # Rigaku TPASCII row tags: #GD (data), #GI, #MY, …
+_WEIGHT = re.compile(r"weight\s*[:：]?[\s,\t]*([0-9]+(?:\.[0-9]+)?)\s*mg", re.IGNORECASE)
+
+
+def _table_from_lines(lines: list[str]) -> tuple[list[str], np.ndarray]:
+    """The numeric table of a text export, with the column names of the header line above it."""
     sample = "\n".join(lines[:60])
     counts = {d: sample.count(d) for d in (",", "\t", ";")}
     delimiter = max(counts, key=counts.get) if max(counts.values()) else None
-
     rows, header = [], None
-    for k, line in enumerate(lines):
+    for line in lines:
         fields = [f.strip() for f in _split(line, delimiter)]
         while fields and not fields[-1]:          # the trailing comma of the export
             fields.pop()
+        while fields and (not fields[0] or _TAG.match(fields[0])):
+            fields.pop(0)                         # Rigaku's '#GD' tag and an empty first cell
+        if not fields:
+            continue
         numeric = [_is_number(f) for f in fields]
         if len(fields) >= 2 and all(numeric):
             rows.append([float(f) for f in fields])
@@ -167,9 +171,165 @@ def read_measurement(raw: bytes, name: str = "", mapping: dict | None = None) ->
         raise TGDTAParseError("No numeric table with at least 5 rows was found.")
     width = max(len(r) for r in rows)
     rows = [r for r in rows if len(r) == width]
-    data = np.asarray(rows, dtype=float)
     columns = list(header[:width]) if header and len(header) >= width else [f"column {i + 1}" for i in range(width)]
     columns += [f"column {i + 1}" for i in range(len(columns), width)]
+    return columns, np.asarray(rows, dtype=float)
+
+
+def _mass_from_text(lines: list[str]) -> float | None:
+    for line in lines[:200]:
+        m = _WEIGHT.search(line)
+        if m:
+            value = float(m.group(1))
+            if 0 < value < 1e4:
+                return value
+    return None
+
+
+def _xlsx_sheets(raw: bytes) -> list[list[str]]:
+    """Every sheet of a workbook as tab-separated lines (Rigaku's Excel export: Sheet1 conditions, Sheet2 data)."""
+    try:
+        import openpyxl
+    except ImportError as exc:             # pragma: no cover - listed in requirements.txt
+        raise TGDTAParseError("Reading .xlsx needs openpyxl.") from exc
+    import warnings
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")      # e.g. "wmf image format is not supported"
+            book = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    except Exception as exc:
+        raise TGDTAParseError("This .xlsx file cannot be opened.") from exc
+    sheets = []
+    for sheet in book.worksheets:
+        lines = []
+        for row in sheet.iter_rows(values_only=True):
+            cells = ["" if v is None else (repr(v) if isinstance(v, float) else str(v)).replace("\t", " ") for v in row]
+            if any(c.strip() for c in cells):
+                lines.append("\t".join(cells))
+        sheets.append(lines)
+    book.close()
+    return sheets
+
+
+# Rigaku ThermoPlus EVO measurement file (.MES, "TPE MeasFile"): binary. Each measured series is an int32
+# point count followed by that many float32 values; 60 bytes before the count sits the series' type code.
+MES_SIGNATURE = b"ThermoPlusE"
+MES_TYPES = {1: ("Temp.(deg C)", "temp"), 3: ("TG(mg)", "tg"), 5: ("DTA(uV)", "dta")}
+
+
+def _mes_series(raw: bytes) -> list[tuple[int, int, np.ndarray]]:
+    """(offset of the count, type code, values) of every float32 series of the same, longest length."""
+    found = []
+    for align in range(4):
+        n_words = (len(raw) - align) // 4
+        words = np.frombuffer(raw, "<i4", count=n_words, offset=align)
+        for k in np.nonzero((words >= 20) & (words <= 5_000_000))[0]:
+            count = int(words[k])
+            p = align + 4 * int(k)
+            if p + 4 + 4 * count > len(raw) or p < 64:
+                continue
+            values = np.frombuffer(raw, "<f4", count=count, offset=p + 4)
+            if not np.all(np.isfinite(values)) or np.max(np.abs(values)) > 1e7:
+                continue
+            code = struct.unpack_from("<i", raw, p - 60)[0]
+            found.append((p, code, values.astype(float)))
+    if not found:
+        return []
+    lengths = {}
+    for p, code, v in found:
+        if code in MES_TYPES:
+            lengths[len(v)] = lengths.get(len(v), 0) + 1
+    if not lengths:
+        return []
+    n = max(lengths, key=lambda length: (lengths[length], length))
+    return [(p, code, v) for p, code, v in found if len(v) == n and code in MES_TYPES]
+
+
+def _mes_time_range(raw: bytes, temp: np.ndarray) -> tuple[float, float] | None:
+    """Start and end time (min) from the x-axis record: [t min][t max][…][T min][T max], T as in the series."""
+    pattern = struct.pack("<ff", float(np.float32(temp.min())), float(np.float32(temp.max())))
+    start = 0
+    while True:
+        q = raw.find(pattern, start)
+        if q < 0:
+            return None
+        start = q + 1
+        if q < 12:
+            continue
+        t0, t1 = struct.unpack_from("<f", raw, q - 12)[0], struct.unpack_from("<f", raw, q - 8)[0]
+        if math.isfinite(t0) and math.isfinite(t1) and 0 <= t0 < t1 < 1e5:
+            step_s = (t1 - t0) * 60 / max(len(temp) - 1, 1)
+            if 0.01 <= step_s <= 600:
+                return t0, t1
+
+
+def _mes_mass(raw: bytes) -> float | None:
+    """The sample weight: a float32 after the condition field 0x01B6 (followed by the pan name)."""
+    q = raw.find(b"\x02\x00\xb6\x01")
+    while q >= 0:
+        value = struct.unpack_from("<f", raw, q + 4)[0] if q + 8 <= len(raw) else float("nan")
+        if math.isfinite(value) and 1e-3 <= value < 1e4:      # skips the same bytes elsewhere (denormal floats)
+            return round(float(value), 4)
+        q = raw.find(b"\x02\x00\xb6\x01", q + 1)
+    return None
+
+
+def _read_mes(raw: bytes) -> tuple[list[str], np.ndarray, float | None, list[str]]:
+    series = _mes_series(raw)
+    by_signal = {}
+    for p, code, values in series:
+        by_signal.setdefault(MES_TYPES[code][1], (MES_TYPES[code][0], values))
+    if "temp" not in by_signal:
+        raise TGDTAParseError("No temperature series was found in this Rigaku .MES file.")
+    temp = by_signal["temp"][1]
+    notes = []
+    span = _mes_time_range(raw, np.asarray(temp, np.float32))
+    if span is None:
+        t = np.arange(len(temp)) / 60.0                 # 1 s sampling, the instrument default
+        notes.append("mes_time_assumed")
+    else:
+        t = np.linspace(span[0], span[1], len(temp))
+    columns, cols = ["Time(min)"], [t]
+    for signal in ("temp", "tg", "dta"):
+        if signal in by_signal:
+            columns.append(by_signal[signal][0])
+            cols.append(by_signal[signal][1])
+    return columns, np.column_stack(cols), _mes_mass(raw), notes
+
+
+def read_measurement(raw: bytes, name: str = "", mapping: dict | None = None) -> Measurement:
+    """Parse one file: a text export (CSV / TXT, Rigaku TPASCII), an Excel export (.xlsx) or a Rigaku
+    ThermoPlus EVO measurement file (.MES). ``mapping`` (signal → column index) overrides the automatic choice."""
+    if len(raw) > MAX_FILE_BYTES:
+        raise TGDTAParseError("The file is larger than 40 MB.")
+    mass, notes = None, []
+    if raw.startswith(MES_SIGNATURE):
+        source = "rigaku-mes"
+        columns, data, mass, notes = _read_mes(raw)
+    elif raw[:2] == b"PK":
+        source = "xlsx"
+        sheets = _xlsx_sheets(raw)
+        table = None
+        for lines in sheets:
+            try:
+                table = _table_from_lines(lines)
+                break
+            except TGDTAParseError:
+                continue
+        if table is None:
+            raise TGDTAParseError("No numeric table with at least 5 rows was found in the workbook.")
+        columns, data = table
+        mass = next((m for m in (_mass_from_text(lines) for lines in sheets) if m), None)
+    else:
+        source = "text"
+        text = decode_text(raw)
+        lines = [line.rstrip("\r\n") for line in text.splitlines()]
+        lines = [line for line in lines if line.strip()]
+        if not lines:
+            raise TGDTAParseError("The file is empty.")
+        columns, data = _table_from_lines(lines)
+        mass = _mass_from_text(lines)
+    width = data.shape[1]
     auto = guess_mapping(columns)
     if mapping:
         for signal in SIGNALS:
@@ -177,7 +337,8 @@ def read_measurement(raw: bytes, name: str = "", mapping: dict | None = None) ->
                 value = mapping[signal]
                 auto[signal] = value if isinstance(value, int) and 0 <= value < width else None
     units = {signal: _unit_of(signal, columns[i]) for signal, i in auto.items() if i is not None}
-    return Measurement(name=name, columns=columns, data=data, mapping=auto, units=units)
+    return Measurement(name=name, columns=columns, data=data, mapping=auto, units=units, mass_mg=mass,
+                       source=source, notes=notes)
 
 
 # ------------------------------------------------------------------------------------------------ processing
