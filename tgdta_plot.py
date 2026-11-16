@@ -25,7 +25,7 @@ from matplotlib.transforms import blended_transform_factory
 
 from figure_style import apply_mpl_style, css_font_stack, font_rcparams, validate_style_settings
 from rich_text import plain, rich, to_html
-from tgdta_io import Processed, dta_peaks, mass_change, peak_onset, tg_at
+from tgdta_io import Processed, dta_peaks, glass_transition, mass_change, peak_onset, tg_at
 
 
 SIGNAL_ORDER = ("tg", "dtg", "dta")
@@ -82,6 +82,8 @@ class PlotOptions:
     onset_symbol_exo: str = "<i>T</i>_{x}"
     onset_symbol_endo: str = ""
     mirror_ticks: bool = False            # with the full frame: ticks on the top (and right) axes too
+    tg_range: tuple | None = None         # (lo, hi) °C where the glass-transition step is sought; None = off
+    tg_symbol: str = "<i>T</i>_{g}"
     mass_ranges: list = field(default_factory=list)  # [(lo °C, hi °C)]
     mass_decimals: int = 1
     mass_lines: bool = True
@@ -208,6 +210,25 @@ def peak_list(c: Curve, opts: PlotOptions):
     return out
 
 
+def glass_info(c: Curve, opts: PlotOptions) -> dict | None:
+    """The glass transition of one curve in opts.tg_range (°C): onset and inflection temperatures, and the
+    construction lines in axis coordinates. None when off, or when no clear step is found."""
+    y = series(c, "dta")
+    if y is None or not opts.tg_range:
+        return None
+    g = glass_transition(c.data.T, y, opts.tg_range[0], opts.tg_range[1], exo_up=opts.exo_up)
+    if g is None:
+        return None
+    to_x = (lambda T: T) if opts.x_mode == "temp" else (lambda T: x_of_temperature(c.data, T, opts))
+    a, b = g["baseline"]
+    xs_base = [g["x_base_start"], g["x"]]
+    T_end = g["x_inflection"] + 0.5 * (g["x_inflection"] - g["x"])
+    xs_tan = [g["x"], T_end]
+    return {"T": g["x"], "T_inflection": g["x_inflection"], "x": to_x(g["x"]), "y": g["y"],
+            "base_line": ([to_x(v) for v in xs_base], [a * v + b for v in xs_base]),
+            "tangent": ([to_x(v) for v in xs_tan], [g["y"] + g["slope"] * (v - g["x"]) for v in xs_tan])}
+
+
 def onset_label(T: float, kind: str, opts: PlotOptions) -> str:
     symbol = (opts.onset_symbol_exo if kind == "exo" else opts.onset_symbol_endo).strip()
     text = _fmt_temp(T, opts.peak_decimals)
@@ -247,6 +268,8 @@ def feature_rows(curves: list[Curve], opts: PlotOptions) -> list[dict]:
         found = peak_list(c, PlotOptions(**{**opts.__dict__, "peak_mode": "both"}))
         row["peaks"] = [(T, kind) for _, _, T, kind, _ in found]
         row["onsets"] = [(o["T"], kind) for _, _, _, kind, o in found if o is not None]
+        g = glass_info(c, opts)
+        row["tg"] = (g["T"], g["T_inflection"]) if g else None
         row["steps"] = [(lo, hi, d) for _, _, d, lo, hi in mass_list(c, opts)]
         rows.append(row)
     return rows
@@ -456,6 +479,24 @@ def render_mpl(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: str
             if not any(v is not None for v in (opts.y_ranges.get("dta") or (None, None))):
                 a.margins(y=0.12)       # room for the temperatures above and below the peaks
 
+        # Glass transition: baseline and tangent, the onset marked and labelled above the step.
+        if opts.tg_range and "dta" in axes:
+            a = axes["dta"]
+            for c in curves:
+                g = glass_info(c, opts)
+                if g is None:
+                    continue
+                color = c.color2 if single and c.color2 else c.color
+                if opts.onset_lines:
+                    for xs, ys in (g["base_line"], g["tangent"]):
+                        a.plot(xs, ys, color=MARKER_COLOR, lw=0.5 * lw, ls=(0, (2, 1.5)), zorder=1.5)
+                a.plot([g["x"]], [g["y"]], marker="o", ms=2.2, mfc="white", mec=color, mew=0.6 * lw, zorder=3)
+                label = f"{opts.tg_symbol.strip()} = " if opts.tg_symbol.strip() else ""
+                a.annotate(rich(label + _fmt_temp(g["T"], opts.peak_decimals)), (g["x"], g["y"]),
+                           xytext=(-3, 3 if opts.exo_up else -3), textcoords="offset points", ha="right",
+                           va="bottom" if opts.exo_up else "top", fontsize=opts.annotation_font_size, color=color,
+                           bbox=dict(fc="white", ec="none", alpha=0.8, pad=0.4), zorder=4)
+
         if opts.exo_arrow and "dta" in axes:
             _exo_arrow_mpl(axes["dta"], opts, style, opts.annotation_font_size)
 
@@ -554,6 +595,25 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
                 fig.add_annotation(x=onset["x"], y=onset["y"], xref=xr, yref=yr, text=to_html(onset_label(onset["T"], kind, opts)),
                                    showarrow=False, xanchor="right", xshift=-4, yshift=-7 if up else 7,
                                    font=dict(size=opts.annotation_font_size, color=color))
+    if opts.tg_range and "dta" in signals:
+        xr, yr = refs["dta"]
+        for c in curves:
+            g = glass_info(c, opts)
+            if g is None:
+                continue
+            color = c.color2 if single and c.color2 else c.color
+            if opts.onset_lines:
+                for xs, ys in (g["base_line"], g["tangent"]):
+                    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", showlegend=False, hoverinfo="skip",
+                                             line=dict(color=MARKER_COLOR, width=0.5 * lw, dash="dot")), **where["dta"])
+            fig.add_trace(go.Scatter(x=[g["x"]], y=[g["y"]], mode="markers", showlegend=False,
+                                     marker=dict(size=5, color="white", line=dict(color=color, width=1)),
+                                     hovertemplate=f"Tg onset {g['T']:.1f} °C, inflection {g['T_inflection']:.1f} °C<extra></extra>"),
+                          **where["dta"])
+            label = f"{opts.tg_symbol.strip()} = " if opts.tg_symbol.strip() else ""
+            fig.add_annotation(x=g["x"], y=g["y"], xref=xr, yref=yr, text=to_html(label + _fmt_temp(g["T"], opts.peak_decimals)),
+                               showarrow=False, xanchor="right", xshift=-4, yshift=7 if opts.exo_up else -7,
+                               font=dict(size=opts.annotation_font_size, color=color))
     if opts.exo_arrow and "dta" in signals:
         xr, yr = refs["dta"]
         left, top = "left" in opts.exo_loc, "upper" in opts.exo_loc

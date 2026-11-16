@@ -20,7 +20,7 @@ sys.path.insert(0, str(APP_DIR))
 from figure_style import STYLE_DEFAULTS, export_figure  # noqa: E402
 from project_io import ProjectError, clean_settings, decode_project, encode_project  # noqa: E402
 from style_templates import decode_style_template, encode_style_template  # noqa: E402
-from tgdta_io import (dta_peaks, guess_mapping, heating_rate, heating_segment, parse_markers, parse_ranges,  # noqa: E402
+from tgdta_io import (dta_peaks, glass_transition, guess_mapping, heating_rate, heating_segment, parse_markers, parse_ranges,  # noqa: E402
                       peak_onset, process, processed_table, read_measurement)
 from tgdta_plot import Curve, PlotOptions, feature_rows, render_mpl, render_plotly  # noqa: E402
 
@@ -181,6 +181,17 @@ class Processing(unittest.TestCase):
         T = np.round(p.T, 0)
         self.assertAlmostEqual(peak_onset(T, p.dta, exo, "exo")["x"], onset["x"], delta=1.0)
 
+    def test_glass_transition(self):
+        # A tanh step of width w at 700 °C: inflection 700, tangent onset 700 − w over a sloping baseline.
+        T = np.linspace(400, 900, 3000)
+        noise = np.random.default_rng(0).normal(0, 0.01, T.size)
+        y = 0.002 * T - 0.5 * (1 + np.tanh((T - 700) / 10)) + noise
+        g = glass_transition(T, y, 600, 760)
+        self.assertAlmostEqual(g["x"], 690, delta=1.5)
+        self.assertAlmostEqual(g["x_inflection"], 700, delta=1.5)
+        self.assertIsNone(glass_transition(T, 0.002 * T + noise, 600, 760))            # no step, no Tg
+        self.assertAlmostEqual(glass_transition(T, -y, 600, 760, exo_up=False)["x"], 690, delta=1.5)
+
     def test_text_inputs(self):
         self.assertEqual(parse_ranges("25-200, 200–800\n800 to 1200; x"), [(25, 200), (200, 800), (800, 1200)])
         self.assertEqual(parse_markers("1014 | cryst.\nfoo\n900"), [(1014.0, "cryst."), (900.0, "")])
@@ -204,7 +215,8 @@ class Figures(unittest.TestCase):
                  PlotOptions(layout="stack", panels=("dta",), x_mode="time", exo_up=False, exo_loc="lower right",
                              show_peaks=True, peak_mode="both"),
                  PlotOptions(layout="stack", panels=("tg",), mirror_ticks=True),
-                 PlotOptions(show_peaks=True, peak_mode="onset", peak_kind="exo", mirror_ticks=True)]
+                 PlotOptions(show_peaks=True, peak_mode="onset", peak_kind="exo", mirror_ticks=True, tg_range=(900, 990)),
+                 PlotOptions(layout="stack", panels=("dta",), x_mode="time", tg_range=(900, 990))]
         for k, opts in enumerate(cases):
             style = dict(FIGAPP_STYLE, axes_box=k >= 4)
             for subset in (curves[:1], curves):
@@ -326,6 +338,7 @@ class RunningApp(unittest.TestCase):
             at.session_state["layout"], at.session_state["lang_radio"] = layout, lang
             at.session_state["show_peaks"], at.session_state["peak_mode"] = True, mode
             at.session_state["axes_box"], at.session_state["mirror_ticks"] = mode == "onset", True
+            at.session_state["show_tg"], at.session_state["tg_range"] = True, "900-990"
             at.session_state["mass_ranges"] = "25-400"
             at.run()
             self.assertFalse(at.exception, (layout, lang))

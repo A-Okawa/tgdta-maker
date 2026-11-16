@@ -625,3 +625,47 @@ def peak_onset(x: np.ndarray, y: np.ndarray, p: int, kind: str = "exo", window: 
     return {"x": float(onset), "y": float(s * (a * onset + b)), "x_inflection": float(x[i]), "y_inflection": float(y[i]),
             "slope": s * m, "baseline": (s * float(a), s * float(b)), "x_base_start": float(x[base][0]),
             "x_peak": float(x[p]), "y_peak": float(y[p])}
+
+
+def glass_transition(x: np.ndarray, y: np.ndarray, lo: float, hi: float, exo_up: bool = True,
+                     baseline_fraction: float = 0.4) -> dict | None:
+    """Glass transition from a DTA step within [lo, hi] (x units): the extrapolated onset, where the baseline
+    (straight line fitted to the first ``baseline_fraction`` of the range) meets the tangent at the steepest
+    endothermic point (the inflection, Ti) — the construction of ISO 11357-2 and ASTM E1356.
+
+    ``exo_up``: exotherm drawn upward, so the endothermic step goes down. Returns None when no step is found.
+    """
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if len(x) < 20 or x[-1] <= x[0] or not lo < hi:
+        return None
+    x = np.maximum.accumulate(smooth(x, 9)) + 1e-9 * np.arange(len(x))
+    inside = np.nonzero((x >= lo) & (x <= hi))[0]
+    if inside.size < 20:
+        return None
+    s = -1.0 if exo_up else 1.0                 # endothermic direction as positive
+    step = float(np.median(np.diff(x[inside])))
+    # Smooth over ~1/12 of the range (at least 5 points): the step is slow, the noise of the DTA is not.
+    w = max(5, int((hi - lo) / 12 / max(step, 1e-9)))
+    ys = s * smooth(y, w)
+    split = lo + baseline_fraction * (hi - lo)
+    base = inside[x[inside] <= split]
+    rest = inside[x[inside] > split]
+    if base.size < 5 or rest.size < 5:
+        return None
+    a, b = np.polyfit(x[base], ys[base], 1)
+    slope = np.gradient(ys) / np.maximum(np.gradient(smooth(x, w)), 1e-12)
+    i = int(rest[np.argmax(slope[rest])])
+    m = float(slope[i])
+    if m <= a or abs(m - a) < 1e-12:
+        return None
+    # The step must stand out from the scatter of the unsmoothed signal about the baseline.
+    noise = float(np.std(s * y[base] - (a * x[base] + b))) or 1e-12
+    depth = float(np.max(ys[rest] - (a * x[rest] + b)))
+    if depth < 3 * noise:
+        return None
+    onset = (ys[i] - m * x[i] - b) / (a - m)
+    if not lo <= onset <= x[i]:
+        return None
+    return {"x": float(onset), "y": float(s * (a * onset + b)), "x_inflection": float(x[i]),
+            "y_inflection": float(s * ys[i]), "slope": s * m, "baseline": (s * float(a), s * float(b)),
+            "x_base_start": float(x[base][0]), "depth": s * depth, "noise": noise}

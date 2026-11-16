@@ -55,7 +55,7 @@ from rich_text import plain
 from style_templates import decode_style_template, encode_style_template
 from tgdta_io import (SIGNALS, SUPPORTED_EXTENSIONS, TGDTAParseError, heating_segment, parse_markers,
                       parse_ranges, process, processed_table, read_measurement)
-from tgdta_plot import Curve, PlotOptions, auto_label, feature_rows, render_mpl, render_plotly, shown_signals
+from tgdta_plot import Curve, PlotOptions, auto_label, feature_rows, glass_info, render_mpl, render_plotly, shown_signals
 
 APP_VERSION = "2026-11-11"
 LOCAL_MODE = os.environ.get("TGDTA_MAKER_LOCAL") == "1"
@@ -140,7 +140,7 @@ DEFAULTS = {
     "show_legend": True, "legend_loc": "best", "color_axes": True, "twin_color2": TWIN_COLOR2,
     "exo_arrow": True, "exo_loc": "upper right",
     "show_peaks": False, "peak_kind": "both", "single_signal": "dta", "mirror_ticks": False,
-    "peak_mode": "peak", "onset_lines": True, "onset_symbol_exo": "<i>T</i>_{x}", "onset_symbol_endo": "", "peak_prom": 0.1, "peak_distance": 30.0, "peak_decimals": 0,
+    "peak_mode": "peak", "onset_lines": True, "show_tg": False, "tg_range": "", "tg_symbol": "<i>T</i>_{g}", "onset_symbol_exo": "<i>T</i>_{x}", "onset_symbol_endo": "", "peak_prom": 0.1, "peak_distance": 30.0, "peak_decimals": 0,
     "mass_ranges": "", "mass_decimals": 1, "mass_lines": True, "markers": "", "panel_gap": 0.06,
     "palette": DEFAULT_PALETTE, "palette_reverse": False, "show_panel": True,
     "dpi_export": 600, "size_unit": "mm", "annotation_font_size": 6.0,
@@ -606,7 +606,7 @@ if st.session_state["layout"] == "twin":
                                                   "Left axis in the TG colour, right axis in the DTA colour (no legend needed then)."))
 
 if "dta" in signals_shown:
-    st.sidebar.subheader(ui("DTA のピーク（Tp・Tx）", "DTA peaks (Tp, Tx)"))
+    st.sidebar.subheader(ui("DTA のピーク・Tg（Tp・Tx・Tg）", "DTA peaks and Tg (Tp, Tx, Tg)"))
     st.sidebar.checkbox(ui("ピークの温度を書く", "Label peak temperatures"), key="show_peaks")
     if st.session_state["show_peaks"]:
         st.sidebar.radio(ui("書く温度", "Temperature"), ["peak", "onset", "both"], key="peak_mode",
@@ -624,13 +624,29 @@ if "dta" in signals_shown:
             _oc[0].text_input(ui("発熱の記号", "Exo symbol"), key="onset_symbol_exo", help=_axis_help)
             _oc[1].text_input(ui("吸熱の記号", "Endo symbol"), key="onset_symbol_endo",
                               help=ui("空欄なら温度だけを書きます。例：`<i>T</i>_{m}`。", "Empty: the temperature only. e.g. `<i>T</i>_{m}`."))
-            st.sidebar.checkbox(ui("接線とベースラインを描く", "Draw the tangent and baseline"), key="onset_lines")
         st.sidebar.slider(ui("ピーク検出の感度（曲線の振れ幅に対する割合）", "Peak prominence (fraction of the curve's range)"),
                           0.01, 0.9, step=0.01, key="peak_prom", help=ui("小さいほど小さなピークも拾います。", "Smaller finds smaller peaks."))
         _pk = st.sidebar.columns(2)
         _pk[0].number_input(ui("ピーク同士の最小間隔", "Min. peak spacing"), 0.0, 1000.0, step=5.0, key="peak_distance",
                             help=ui("横軸の単位（°C または min）。", "In x-axis units (°C or min)."))
         _pk[1].number_input(ui("温度の小数の桁", "Decimals"), 0, 2, step=1, key="peak_decimals")
+    st.sidebar.checkbox(ui("ガラス転移温度 Tg を求める", "Find the glass transition Tg"), key="show_tg",
+                        help=ui("指定した温度範囲の前半を直線でベースラインにし、DTA が吸熱側へ最も急に変わる点（変曲点）での接線との交点を"
+                                "Tg（補外開始温度）とします（ISO 11357-2・ASTM E1356 と同じ作図）。段が雑音に埋もれる、または作図が成り立たない"
+                                "試料では Tg を出しません。",
+                                "The first part of the range is fitted as the baseline; Tg is where it meets the tangent at the steepest "
+                                "endothermic change (inflection), the extrapolated onset of ISO 11357-2 and ASTM E1356. No Tg is given when "
+                                "the step is lost in noise or the construction fails."))
+    if st.session_state["show_tg"]:
+        _tc = st.sidebar.columns([0.6, 0.4])
+        _tc[0].text_input(ui("探す温度範囲 (°C)", "Search range (°C)"), key="tg_range", placeholder="900-1010",
+                          help=ui("段の手前の平らな所から、結晶化ピークの立ち上がりの手前までを入れます。前の 4 割をベースラインに使います。",
+                                  "From the flat part before the step to just before the crystallization rise; the first 40% is the baseline."))
+        _tc[1].text_input(ui("記号", "Symbol"), key="tg_symbol", help=_axis_help)
+    if (st.session_state["show_peaks"] and st.session_state["peak_mode"] != "peak") or st.session_state["show_tg"]:
+        st.sidebar.checkbox(ui("接線とベースラインを描く", "Draw the tangent and baseline"), key="onset_lines")
+    if st.session_state["show_tg"] or st.session_state["show_peaks"]:
+        st.sidebar.caption(ui("値は「数値の一覧」タブにも出ます。", "The values are also in the 'Numbers' tab."))
 
 with st.sidebar.expander(ui("注記（Exo.・質量変化・縦線）", "Annotations (Exo., mass change, lines)")):
     _ec = st.columns([0.45, 0.55])
@@ -858,7 +874,9 @@ if measurements and col_graph is not None:
         peak_kind=state["peak_kind"], peak_prominence=float(state["peak_prom"]), peak_min_distance=float(state["peak_distance"]),
         peak_decimals=int(state["peak_decimals"]), peak_mode=state["peak_mode"], onset_lines=state["onset_lines"],
         onset_symbol_exo=state["onset_symbol_exo"], onset_symbol_endo=state["onset_symbol_endo"],
-        mirror_ticks=bool(state["mirror_ticks"]) and bool(plot_style["axes_box"]), mass_ranges=parse_ranges(state["mass_ranges"]),
+        mirror_ticks=bool(state["mirror_ticks"]) and bool(plot_style["axes_box"]),
+        tg_range=(parse_ranges(state["tg_range"]) or [None])[0] if state["show_tg"] else None,
+        tg_symbol=state["tg_symbol"], mass_ranges=parse_ranges(state["mass_ranges"]),
         mass_decimals=int(state["mass_decimals"]), mass_lines=state["mass_lines"], markers=parse_markers(state["markers"]),
         panel_gap=float(state["panel_gap"]), fig_width=state["fig_width"], fig_height=state["fig_height"],
     )
@@ -867,6 +885,16 @@ if measurements and col_graph is not None:
     ref_out = [plain(c.label) for c in curves if "ref_out_of_range" in c.data.notes]
 
     with col_graph:
+        if state["show_tg"] and "dta" in signals_shown:
+            if not opts.tg_range:
+                st.info(ui("Tg を求めるには、サイドバーの「探す温度範囲」に 900-1010 のように入れてください。",
+                           "To find Tg, enter a search range such as 900-1010 in the sidebar."))
+            else:
+                no_tg = [plain(c.label) for c in curves if c.data.dta is not None and glass_info(c, opts) is None]
+                if no_tg:
+                    st.info(ui("{lo:g}–{hi:g} °C にはっきりした段がないため、Tg を出していません: ",
+                               "No clear step in {lo:g}–{hi:g} °C, so no Tg for: ").format(lo=opts.tg_range[0], hi=opts.tg_range[1])
+                            + ", ".join(no_tg))
         if no_mass:
             st.info(ui("初期質量 m₀ が未入力のため、TG を mg で描いています: ", "No initial mass m₀, so TG is drawn in mg: ")
                     + ", ".join(no_mass) + ui("（サイドバーの「TG」で m₀ を入れると % になります）", " (enter m₀ under 'TG' in the sidebar for %)"))
@@ -915,6 +943,9 @@ if measurements and col_graph is not None:
                     ui("吸熱ピーク (°C)", "Endo peaks (°C)"): ", ".join(f"{T:.0f}" for T, k in r["peaks"] if k == "endo"),
                     ui("発熱の補外開始 Tx (°C)", "Exo onset Tx (°C)"): ", ".join(f"{T:.1f}" for T, k in r["onsets"] if k == "exo"),
                     ui("吸熱の補外開始 (°C)", "Endo onset (°C)"): ", ".join(f"{T:.1f}" for T, k in r["onsets"] if k == "endo"),
+                    **({ui("Tg 補外開始 (°C)", "Tg onset (°C)"): (f"{r['tg'][0]:.1f}" if r["tg"] else ui("段がはっきりしない", "no clear step")),
+                        ui("Tg 変曲点 (°C)", "Tg inflection (°C)"): (f"{r['tg'][1]:.1f}" if r["tg"] else "")}
+                       if opts.tg_range else {}),
                     ui("範囲ごとの質量変化", "Mass change by range"): "; ".join(f"{lo:g}–{hi:g} °C: {d:+.2f}".replace("-", "−")
                                                                          for lo, hi, d in r["steps"]),
                 } for r in rows])
