@@ -22,7 +22,7 @@ from project_io import ProjectError, clean_settings, decode_project, encode_proj
 from style_templates import decode_style_template, encode_style_template  # noqa: E402
 from tgdta_io import (dta_peaks, glass_transition, guess_mapping, heating_rate, heating_segment, parse_markers, parse_ranges,  # noqa: E402
                       peak_onset, process, processed_table, read_measurement)
-from tgdta_plot import Curve, PlotOptions, feature_rows, render_mpl, render_plotly  # noqa: E402
+from tgdta_plot import Curve, PlotOptions, editable_features, feature_rows, intersect, render_mpl, render_plotly  # noqa: E402
 
 # The files XRD Maker, Raman Maker and UV-Vis-NIR Maker share. A change here must be copied to all apps.
 SHARED_SHA256 = {
@@ -266,6 +266,27 @@ class Figures(unittest.TestCase):
         self.assertTrue(ax.xaxis.get_tick_params(which="major").get("top", ax.xaxis._major_tick_kw.get("tick2On")))
         plt.close(fig)
 
+    def test_hand_drawn_constructions(self):
+        self.assertEqual(intersect([0, 0, 10, 0], [5, -5, 15, 5]), (10.0, 0.0))
+        self.assertIsNone(intersect([0, 0, 10, 0], [0, 1, 10, 1]))
+        curve = self.curves()[0]
+        curve.key = "a.csv"
+        opts = PlotOptions(show_peaks=True, peak_mode="onset", peak_kind="exo", tg_range=(900, 990))
+        self.assertEqual([f["kind"] for f in editable_features(curve, PlotOptions(peak_mode="onset"))], [])
+        exo = next(f for f in editable_features(curve, opts) if f["kind"] == "exo")
+        self.assertFalse(exo["onset"]["manual"])
+        # Baseline at the level of the auto one, tangent crossing it at 995 °C.
+        y0 = exo["onset"]["base"][1]
+        opts.overrides = {"a.csv": {exo["id"]: {"base": [950, y0, 1000, y0], "tan": [995, y0, 1000, y0 + 10]}}}
+        rows = feature_rows([curve], opts)
+        self.assertTrue(any(abs(T - 995) < 1e-6 and k == "exo" for T, k in rows[0]["manual"]), rows[0])
+        fig, _ = render_mpl([curve], opts, FIGAPP_STYLE)
+        self.assertTrue(any("995 °C" in t.get_text() for t in fig.axes[1].texts))
+        plt.close(fig)
+        # A peak moved by more than 10 °C no longer takes the hand-drawn lines.
+        opts.overrides = {"a.csv": {"exo@1100": {"base": [950, y0, 1000, y0], "tan": [995, y0, 1000, y0 + 10]}}}
+        self.assertEqual(feature_rows([curve], opts)[0]["manual"], [])
+
     def test_feature_rows(self):
         rows = feature_rows(self.curves(), PlotOptions(mass_ranges=[(25, 400)]))
         self.assertAlmostEqual(rows[0]["rate"], 15.0, delta=0.2)
@@ -289,6 +310,14 @@ class Projects(unittest.TestCase):
         self.assertEqual(project["files"], {"a.csv": raw})
         self.assertEqual(project["settings"]["time_range"], (0.0, 80.0))
         self.assertNotIn("unknown_key", project["settings"])
+
+    def test_hand_drawn_lines_in_projects(self):
+        lines = {"a.csv": {"exo@1081": {"base": [950.0, 1.0, 1000.0, 1.0], "tan": [995.0, 1.0, 1000.0, 11.0]}}}
+        project = decode_project(encode_project({"a.csv": synthetic_csv()}, {"onset_overrides": lines}))
+        self.assertEqual(project["settings"]["onset_overrides"], lines)
+        for bad in ({"a.csv": {"tg": {"base": [1, 2, 3], "tan": [1, 2, 3, 4]}}}, {"a.csv": {"tg": {"base": "x", "tan": []}}}):
+            with self.assertRaises(ProjectError):
+                clean_settings({"onset_overrides": bad})
 
     def test_invalid_values_are_refused(self):
         for bad in ({"layout": "<script>"}, {"color_0": "red"}, {"dpi_export": 72}, {"mass_0": -1}):

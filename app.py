@@ -55,7 +55,9 @@ from rich_text import plain
 from style_templates import decode_style_template, encode_style_template
 from tgdta_io import (SIGNALS, SUPPORTED_EXTENSIONS, TGDTAParseError, heating_segment, parse_markers,
                       parse_ranges, process, processed_table, read_measurement)
-from tgdta_plot import Curve, PlotOptions, auto_label, feature_rows, glass_info, render_mpl, render_plotly, shown_signals
+from onset_editor import onset_editor
+from tgdta_plot import (Curve, PlotOptions, auto_label, editable_features, feature_rows, glass_info, render_mpl,
+                        render_plotly, shown_signals)
 
 APP_VERSION = "2026-11-11"
 LOCAL_MODE = os.environ.get("TGDTA_MAKER_LOCAL") == "1"
@@ -857,7 +859,22 @@ if measurements and col_graph is not None:
             continue
         curves.append(Curve(label=str(state.get(f"lbl_{i}") or os.path.splitext(names[i])[0]),
                             color=state.get(f"color_{i}", "#000000"), data=processed[i],
-                            dta_offset=float(state.get(f"dtaoff_{i}") or 0.0), color2=state.get("twin_color2", TWIN_COLOR2)))
+                            dta_offset=float(state.get(f"dtaoff_{i}") or 0.0), color2=state.get("twin_color2", TWIN_COLOR2),
+                            key=names[i]))
+    # Constructions dragged in the editor: the editor's last value is applied before the figure is drawn,
+    # so the figure, the numbers and the saved project all use the adjusted lines.
+    overrides = {s: dict(f) for s, f in (state.get("onset_overrides") or {}).items() if s in names}
+    _epoch = state.get("_editor_epoch", 0)
+    for _k in [k for k in list(state) if str(k).startswith("_oe_")]:
+        _v = state.get(_k)
+        if isinstance(_v, dict) and str(_v.get("token", "")).endswith(f"#{_epoch}") and _v.get("sample") in names:
+            try:
+                _line = {"base": [float(v) for v in _v["base"]][:4], "tan": [float(v) for v in _v["tan"]][:4]}
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(_line["base"]) == 4 and len(_line["tan"]) == 4 and all(np.isfinite(_line["base"] + _line["tan"])):
+                overrides.setdefault(_v["sample"], {})[str(_v.get("feature"))] = _line
+    state["onset_overrides"] = overrides
     x_range = None
     if not state["x_auto"] and state["x_min"] < state["x_max"]:
         x_range = (float(state["x_min"]), float(state["x_max"]))
@@ -876,7 +893,7 @@ if measurements and col_graph is not None:
         onset_symbol_exo=state["onset_symbol_exo"], onset_symbol_endo=state["onset_symbol_endo"],
         mirror_ticks=bool(state["mirror_ticks"]) and bool(plot_style["axes_box"]),
         tg_range=(parse_ranges(state["tg_range"]) or [None])[0] if state["show_tg"] else None,
-        tg_symbol=state["tg_symbol"], mass_ranges=parse_ranges(state["mass_ranges"]),
+        tg_symbol=state["tg_symbol"], overrides=overrides, mass_ranges=parse_ranges(state["mass_ranges"]),
         mass_decimals=int(state["mass_decimals"]), mass_lines=state["mass_lines"], markers=parse_markers(state["markers"]),
         panel_gap=float(state["panel_gap"]), fig_width=state["fig_width"], fig_height=state["fig_height"],
     )
@@ -907,8 +924,9 @@ if measurements and col_graph is not None:
         if not curves:
             st.warning(ui("表示する試料がありません。", "No sample is shown."))
         else:
-            tab_live, tab_export, tab_numbers = st.tabs([ui("インタラクティブ", "Interactive"), ui("出力プレビュー", "Export preview"),
-                                                         ui("数値の一覧", "Numbers")])
+            tab_live, tab_export, tab_numbers, tab_adjust = st.tabs([
+                ui("インタラクティブ", "Interactive"), ui("出力プレビュー", "Export preview"), ui("数値の一覧", "Numbers"),
+                ui("Tx・Tg の接線を直す", "Adjust Tx / Tg tangents")])
             with tab_live:
                 st.caption(ui("ドラッグで拡大、ダブルクリックで元に戻ります。曲線に重ねると温度・時間・値が出ます。",
                               "Drag to zoom, double-click to reset. Hover a curve for temperature, time and value."))
@@ -941,10 +959,13 @@ if measurements and col_graph is not None:
                     ui("全体の質量変化", "Total mass change"): f"{r['tg_total']:+.2f} {r['tg_unit']}".replace("-", "−"),
                     ui("発熱ピーク (°C)", "Exo peaks (°C)"): ", ".join(f"{T:.0f}" for T, k in r["peaks"] if k == "exo"),
                     ui("吸熱ピーク (°C)", "Endo peaks (°C)"): ", ".join(f"{T:.0f}" for T, k in r["peaks"] if k == "endo"),
-                    ui("発熱の補外開始 Tx (°C)", "Exo onset Tx (°C)"): ", ".join(f"{T:.1f}" for T, k in r["onsets"] if k == "exo"),
-                    ui("吸熱の補外開始 (°C)", "Endo onset (°C)"): ", ".join(f"{T:.1f}" for T, k in r["onsets"] if k == "endo"),
-                    **({ui("Tg 補外開始 (°C)", "Tg onset (°C)"): (f"{r['tg'][0]:.1f}" if r["tg"] else ui("段がはっきりしない", "no clear step")),
-                        ui("Tg 変曲点 (°C)", "Tg inflection (°C)"): (f"{r['tg'][1]:.1f}" if r["tg"] else "")}
+                    ui("発熱の補外開始 Tx (°C)", "Exo onset Tx (°C)"): ", ".join(
+                        f"{T:.1f}" + ("*" if (T, k) in r["manual"] else "") for T, k in r["onsets"] if k == "exo"),
+                    ui("吸熱の補外開始 (°C)", "Endo onset (°C)"): ", ".join(
+                        f"{T:.1f}" + ("*" if (T, k) in r["manual"] else "") for T, k in r["onsets"] if k == "endo"),
+                    **({ui("Tg 補外開始 (°C)", "Tg onset (°C)"): (f"{r['tg'][0]:.1f}" + ("*" if r["tg_manual"] else "")
+                                                                 if r["tg"] else ui("段がはっきりしない", "no clear step")),
+                        ui("Tg 変曲点 (°C)", "Tg inflection (°C)"): (f"{r['tg'][1]:.1f}" if r["tg"] and np.isfinite(r["tg"][1]) else "")}
                        if opts.tg_range else {}),
                     ui("範囲ごとの質量変化", "Mass change by range"): "; ".join(f"{lo:g}–{hi:g} °C: {d:+.2f}".replace("-", "−")
                                                                          for lo, hi, d in r["steps"]),
@@ -958,6 +979,80 @@ if measurements and col_graph is not None:
                                    processed_table(plain(c.label), c.data).split("\n", 1)[1] for k, c in enumerate(curves))
                 st.download_button(ui("📄 描いた値を CSV で保存", "📄 Save the drawn values (CSV)"), csv_text.encode("utf-8-sig"),
                                    file_name="tgdta_values.csv", mime="text/csv", **FULL_WIDTH["download_button"])
+                if any(r["manual"] or r["tg_manual"] for r in rows):
+                    st.caption(ui("数値の後ろの \\* は「Tx・Tg の接線を直す」で手で引き直した値です。",
+                                  "A \\* after a value: adjusted by hand under 'Adjust Tx / Tg tangents'."))
+
+            with tab_adjust:
+                features = {c.key: editable_features(c, opts) for c in curves if c.data.dta is not None}
+                features = {k: v for k, v in features.items() if v}
+                if not features:
+                    st.info(ui("サイドバー「DTA のピーク・Tg」で、「ピークの温度を書く」→「補外開始温度（Tx）」か、「ガラス転移温度 Tg を求める」を"
+                               "オンにすると、ここで接線とベースラインを引き直せます。",
+                               "Turn on 'Label peak temperatures' → 'Extrapolated onset (Tx)' or 'Find the glass transition Tg' under "
+                               "'DTA peaks and Tg' in the sidebar to adjust the tangents and baselines here."))
+                else:
+                    by_key = {c.key: c for c in curves}
+                    _ac = st.columns(2)
+                    sample_key = _ac[0].selectbox(ui("試料", "Sample"), list(features), key="_adjust_sample",
+                                                  format_func=lambda k: plain(by_key[k].label))
+                    feats = features[sample_key]
+                    labels = {}
+                    for f in feats:
+                        tag = ui("手動", "manual") if f["onset"]["manual"] else ui("自動", "automatic")
+                        if f["kind"] == "tg":
+                            labels[f["id"]] = f"Tg · {f['onset']['T']:.1f} °C（{tag}）"
+                        else:
+                            name = ui("発熱", "exo") if f["kind"] == "exo" else ui("吸熱", "endo")
+                            labels[f["id"]] = (f"{'Tx' if f['kind'] == 'exo' else 'onset'} · {f['onset']['T']:.1f} °C（{tag}）"
+                                               + ui(" · {k}ピーク {p:.0f} °C", " · {k} peak {p:.0f} °C").format(k=name, p=f["T_peak"]))
+                    # The labels change (automatic → manual) after a drag, which makes a new widget: keep the
+                    # chosen construction in our own state so the editor stays on it.
+                    ids = list(labels)
+                    remembered = state.get("_adjust_fid", {}).get(sample_key)
+                    fid = _ac[1].selectbox(ui("直すもの", "Construction"), ids,
+                                           index=ids.index(remembered) if remembered in ids else 0,
+                                           format_func=lambda k: labels.get(k, k))
+                    state["_adjust_fid"] = {**state.get("_adjust_fid", {}), sample_key: fid}
+                    f = next((x for x in feats if x["id"] == fid), feats[0])   # the list changes with the sample
+                    fid = f["id"]
+                    c = by_key[sample_key]
+                    # Show the whole of both lines, so each end can be grabbed.
+                    xs_lines = f["onset"]["base"][0::2] + f["onset"]["tan"][0::2]
+                    lo, hi = min([f["window"][0]] + xs_lines), max([f["window"][1]] + xs_lines)
+                    lo, hi = lo - 0.03 * (hi - lo), hi + 0.03 * (hi - lo)
+                    sel = (c.data.T >= lo) & (c.data.T <= hi)
+                    y_raw = c.data.dta[sel]
+                    ys = np.concatenate([y_raw, f["onset"]["base"][1::2], f["onset"]["tan"][1::2]])
+                    pad = 0.08 * (float(np.nanmax(ys)) - float(np.nanmin(ys)) or 1.0)
+                    symbol = "Tg" if f["kind"] == "tg" else ("Tx" if f["kind"] == "exo" else "T_on")
+                    st.caption(ui("灰色の破線（ベースライン）と赤の破線（接線）は、線の端をドラッグすると傾きが、線の中ほどをドラッグすると"
+                                  "位置が変わります。手を離すと交点の温度が決まり、図・数値の一覧・作業ファイルに入ります。",
+                                  "Drag an end of the grey (baseline) or red (tangent) dashed line to tilt it, or its middle to move it. "
+                                  "On release the crossing sets the temperature, used in the figure, the numbers and the project."))
+                    onset_editor(T=c.data.T[sel], y=y_raw, base=f["onset"]["base"], tan=f["onset"]["tan"],
+                                 xrange=(lo, hi), yrange=(float(np.nanmin(ys)) - pad, float(np.nanmax(ys)) + pad),
+                                 label=symbol, ylabel="DTA (" + (c.data.dta_unit or "a.u.") + ")", color=c.color,
+                                 token=f"{sample_key}|{fid}|{f['onset']['manual']}#{_epoch}", sample=sample_key, feature=fid,
+                                 text_hint=ui("（ドラッグで直せます）", "(drag to adjust)"),
+                                 text_parallel=ui("2 本の線が平行で、交点がありません。", "The two lines are parallel: no crossing."),
+                                 key=f"_oe_{_epoch}_{abs(hash((sample_key, fid))) % 10**8}")
+                    _bc = st.columns(2)
+
+                    def _reset(sample, feature=None):
+                        saved = dict(st.session_state.get("onset_overrides") or {})
+                        if feature is None:
+                            saved.pop(sample, None)
+                        elif sample in saved:
+                            saved[sample] = {k: v for k, v in saved[sample].items() if k != feature}
+                        st.session_state["onset_overrides"] = saved
+                        st.session_state["_editor_epoch"] = st.session_state.get("_editor_epoch", 0) + 1
+
+                    manual_ids = [k for k in (overrides.get(sample_key) or {})]
+                    _bc[0].button(ui("この線を自動に戻す", "Back to automatic"), on_click=_reset, args=(sample_key, fid),
+                                  disabled=not f["onset"]["manual"], **FULL_WIDTH["button"])
+                    _bc[1].button(ui("この試料の手動の線をすべて消す", "Clear all hand-drawn lines of this sample"),
+                                  on_click=_reset, args=(sample_key,), disabled=not manual_ids, **FULL_WIDTH["button"])
 
             st.sidebar.download_button(ui("📥 PDF として保存", "📥 Save as PDF"), pdf_bytes, file_name="tgdta_result.pdf",
                                        mime="application/pdf", **FULL_WIDTH["download_button"])

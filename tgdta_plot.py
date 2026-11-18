@@ -48,6 +48,7 @@ class Curve:
     dta_offset: float = 0.0
     tg_offset: float = 0.0
     color2: str | None = None            # DTA/DTG colour of a single sample in the twin layout
+    key: str = ""                        # stable id (the file name): hand-drawn constructions are stored under it
 
 
 @dataclass
@@ -84,6 +85,9 @@ class PlotOptions:
     mirror_ticks: bool = False            # with the full frame: ticks on the top (and right) axes too
     tg_range: tuple | None = None         # (lo, hi) °C where the glass-transition step is sought; None = off
     tg_symbol: str = "<i>T</i>_{g}"
+    # Hand-adjusted constructions: {curve key: {feature id: {"base": [T0, y0, T1, y1], "tan": [...]}}},
+    # in °C and DTA without offset; feature id "exo@1081" (kind@peak °C, matched within 10 °C) or "tg".
+    overrides: dict = field(default_factory=dict)
     mass_ranges: list = field(default_factory=list)  # [(lo °C, hi °C)]
     mass_decimals: int = 1
     mass_lines: bool = True
@@ -176,11 +180,53 @@ def _fmt_change(value: float, unit: str, decimals: int) -> str:
     return f"{text}{'%' if unit == '%' else ' mg'}"
 
 
+def intersect(line1, line2):
+    """Crossing point of two straight lines, each [x0, y0, x1, y1]; None when parallel."""
+    x0, y0, x1, y1 = map(float, line1)
+    u0, v0, u1, v1 = map(float, line2)
+    d = (x0 - x1) * (v0 - v1) - (y0 - y1) * (u0 - u1)
+    if abs(d) < 1e-15:
+        return None
+    a, b = x0 * y1 - y0 * x1, u0 * v1 - v0 * u1
+    return ((a * (u0 - u1) - (x0 - x1) * b) / d, (a * (v0 - v1) - (y0 - y1) * b) / d)
+
+
+def _construction(base, tan, offset=0.0, manual=False):
+    """A construction (two lines and their crossing) in °C and DTA units, the crossing as T and y.
+
+    Each line is drawn from its end farther from the crossing to the crossing, so the two meet there."""
+    point = intersect(base, tan)
+    if point is None or not all(map(math.isfinite, point)):
+        return None
+    T, y = point
+    lines = []
+    for x0, y0, x1, y1 in (base, tan):
+        far = (x0, y0) if abs(x0 - T) >= abs(x1 - T) else (x1, y1)
+        lines.append(([far[0], T], [far[1] + offset, y + offset]))
+    return {"T": float(T), "y": float(y + offset), "lines": lines, "base": list(map(float, base)),
+            "tan": list(map(float, tan)), "manual": manual}
+
+
+def _override(c: Curve, opts: PlotOptions, kind: str, T_peak: float | None = None):
+    saved = (opts.overrides or {}).get(c.key) or {}
+    if kind == "tg":
+        return saved.get("tg")
+    for fid, value in saved.items():
+        k, _, t = fid.partition("@")
+        try:
+            if k == kind and abs(float(t) - T_peak) <= 10:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def peak_list(c: Curve, opts: PlotOptions):
     """[(x on the axis, y, temperature, kind, onset)] of the DTA peaks of one curve within the x range.
 
-    ``onset`` is the extrapolated onset (see tgdta_io.peak_onset) with its temperature under 'T',
-    or None when the peak has no clear leading edge.
+    ``onset`` is the extrapolated onset (Tx for crystallization): the automatic construction of
+    tgdta_io.peak_onset, or the one adjusted by hand in opts.overrides. It is in °C and drawn units
+    (``T``, ``y``, ``lines``); None when the peak has no clear leading edge.
     """
     y = series(c, "dta")
     if y is None:
@@ -198,35 +244,96 @@ def peak_list(c: Curve, opts: PlotOptions):
     out = []
     for k, kind in found:
         onset = None
+        T_peak = float(c.data.T[idx[k]])
         if opts.peak_mode in ("onset", "both"):
-            # Onset on the drawn curve; exo is a maximum of the signed curve, so pass 'exo' and flip back.
-            onset = peak_onset(x[idx], signed, k, "exo" if kind == "exo" else "endo")
-            if onset is not None:
-                if not opts.exo_up:
-                    onset = {**onset, "y": -onset["y"], "y_inflection": -onset["y_inflection"], "slope": -onset["slope"],
-                             "baseline": tuple(-v for v in onset["baseline"]), "y_peak": -onset["y_peak"]}
-                onset["T"] = onset["x"] if opts.x_mode == "temp" else tg_at(c.data.t, c.data.T, onset["x"])
-        out.append((float(x[idx[k]]), float(y[idx[k]]), float(c.data.T[idx[k]]), kind, onset))
+            saved = _override(c, opts, kind, T_peak)
+            if saved:
+                onset = _construction(saved["base"], saved["tan"], c.dta_offset, manual=True)
+            if onset is None:
+                # Automatic, on the temperature axis (the run is a heating ramp, so T rises with time).
+                o = peak_onset(c.data.T[idx], signed, k, "exo" if kind == "exo" else "endo")
+                if o is not None:
+                    s = 1.0 if opts.exo_up else -1.0
+                    a, b = (s * v for v in o["baseline"])
+                    yo, slope, y_peak = s * o["y"], s * o["slope"], s * o["y_peak"]
+                    x_end = o["x"] + (y_peak - yo) / slope * 0.85
+                    base = [o["x_base_start"], a * o["x_base_start"] + b, o["x"], yo]
+                    tan = [o["x"], yo, x_end, yo + slope * (x_end - o["x"])]
+                    onset = _construction([v if j % 2 == 0 else v - c.dta_offset for j, v in enumerate(base)],
+                                          [v if j % 2 == 0 else v - c.dta_offset for j, v in enumerate(tan)],
+                                          c.dta_offset)
+        out.append((float(x[idx[k]]), float(y[idx[k]]), T_peak, kind, onset))
     return out
 
 
 def glass_info(c: Curve, opts: PlotOptions) -> dict | None:
-    """The glass transition of one curve in opts.tg_range (°C): onset and inflection temperatures, and the
-    construction lines in axis coordinates. None when off, or when no clear step is found."""
+    """The glass transition of one curve in opts.tg_range (°C): onset (and inflection) temperature and the
+    construction, automatic or adjusted by hand. None when off, or when no clear step is found."""
     y = series(c, "dta")
     if y is None or not opts.tg_range:
         return None
-    g = glass_transition(c.data.T, y, opts.tg_range[0], opts.tg_range[1], exo_up=opts.exo_up)
+    saved = _override(c, opts, "tg")
+    if saved:
+        g = _construction(saved["base"], saved["tan"], c.dta_offset, manual=True)
+        if g is not None:
+            return {**g, "T_inflection": float("nan")}
+    g = glass_transition(c.data.T, y - c.dta_offset, opts.tg_range[0], opts.tg_range[1], exo_up=opts.exo_up)
     if g is None:
         return None
-    to_x = (lambda T: T) if opts.x_mode == "temp" else (lambda T: x_of_temperature(c.data, T, opts))
     a, b = g["baseline"]
-    xs_base = [g["x_base_start"], g["x"]]
     T_end = g["x_inflection"] + 0.5 * (g["x_inflection"] - g["x"])
-    xs_tan = [g["x"], T_end]
-    return {"T": g["x"], "T_inflection": g["x_inflection"], "x": to_x(g["x"]), "y": g["y"],
-            "base_line": ([to_x(v) for v in xs_base], [a * v + b for v in xs_base]),
-            "tangent": ([to_x(v) for v in xs_tan], [g["y"] + g["slope"] * (v - g["x"]) for v in xs_tan])}
+    base = [g["x_base_start"], a * g["x_base_start"] + b, g["x"], g["y"]]
+    tan = [g["x"], g["y"], T_end, g["y"] + g["slope"] * (T_end - g["x"])]
+    out = _construction(base, tan, c.dta_offset)
+    if out is not None:
+        out["T_inflection"] = g["x_inflection"]
+    return out
+
+
+def to_axis(c: Curve, opts: PlotOptions, temps) -> list[float]:
+    """Temperatures as positions on the x axis (the time they were reached, on a time axis)."""
+    return [float(T) if opts.x_mode == "temp" else x_of_temperature(c.data, float(T), opts) for T in temps]
+
+
+def _through(line, T, y, beyond=0.4):
+    """A line as the editor shows it: from its far end through the crossing (T, y) and 40 % further,
+    so that dragging either end moves the crossing instead of turning the line about it."""
+    x0, y0, x1, y1 = line
+    fx, fy = (x0, y0) if abs(x0 - T) >= abs(x1 - T) else (x1, y1)
+    return [fx, fy, T + beyond * (T - fx), y + beyond * (y - fy)]
+
+
+def editable_features(c: Curve, opts: PlotOptions) -> list[dict]:
+    """The constructions that can be adjusted by hand for one curve: every DTA peak onset and Tg,
+    in °C and DTA without offset, with a window around each for the editor."""
+    out = []
+    probe = PlotOptions(**{**opts.__dict__, "peak_mode": "onset", "x_mode": "temp",
+                           "x_range": opts.x_range if opts.x_mode == "temp" else None})
+    def editor_lines(construction):
+        y = construction["y"] - c.dta_offset
+        construction = dict(construction)
+        if not construction["manual"]:
+            construction["base"] = _through(construction["base"], construction["T"], y)
+            construction["tan"] = _through(construction["tan"], construction["T"], y)
+        return construction
+
+    shown = opts.show_peaks and opts.peak_mode in ("onset", "both")      # only what the figure shows
+    for _, _, T_peak, kind, onset in (peak_list(c, probe) if shown else []):
+        if onset is None:
+            continue
+        onset = editor_lines(onset)
+        lo = min(onset["base"][0], onset["base"][2]) - 15
+        hi = max(T_peak + 0.6 * (T_peak - onset["T"]) + 10, onset["T"] + 20)
+        out.append({"id": f"{kind}@{round(T_peak)}", "kind": kind, "T_peak": T_peak, "onset": onset,
+                    "window": (lo, hi)})
+    if opts.tg_range:
+        g = glass_info(c, PlotOptions(**{**probe.__dict__}))
+        if g is not None:
+            g = editor_lines(g)
+            span = opts.tg_range[1] - opts.tg_range[0]
+            out.append({"id": "tg", "kind": "tg", "T_peak": None, "onset": g,
+                        "window": (opts.tg_range[0] - 0.1 * span, opts.tg_range[1] + 0.2 * span)})
+    return out
 
 
 def onset_label(T: float, kind: str, opts: PlotOptions) -> str:
@@ -268,8 +375,10 @@ def feature_rows(curves: list[Curve], opts: PlotOptions) -> list[dict]:
         found = peak_list(c, PlotOptions(**{**opts.__dict__, "peak_mode": "both"}))
         row["peaks"] = [(T, kind) for _, _, T, kind, _ in found]
         row["onsets"] = [(o["T"], kind) for _, _, _, kind, o in found if o is not None]
+        row["manual"] = [(o["T"], kind) for _, _, _, kind, o in found if o is not None and o.get("manual")]
         g = glass_info(c, opts)
         row["tg"] = (g["T"], g["T_inflection"]) if g else None
+        row["tg_manual"] = bool(g and g.get("manual"))
         row["steps"] = [(lo, hi, d) for _, _, d, lo, hi in mass_list(c, opts)]
         rows.append(row)
     return rows
@@ -462,17 +571,13 @@ def render_mpl(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: str
                                    fontsize=opts.annotation_font_size, color=color)
                     if onset is None:
                         continue
+                    xo = to_axis(c, opts, [onset["T"]])[0]
                     if opts.onset_lines:
                         # Baseline extended to the onset, and the tangent from the onset up the leading edge.
-                        ba, bb = onset["baseline"]
-                        xb = np.array([onset["x_base_start"], onset["x"]])
-                        a.plot(xb, ba * xb + bb, color=MARKER_COLOR, lw=0.5 * lw, ls=(0, (2, 1.5)), zorder=1.5)
-                        x_end = onset["x"] + (onset["y_peak"] - onset["y"]) / onset["slope"] * 0.85
-                        xt = np.array([onset["x"], x_end])
-                        a.plot(xt, onset["y"] + onset["slope"] * (xt - onset["x"]), color=MARKER_COLOR, lw=0.5 * lw,
-                               ls=(0, (2, 1.5)), zorder=1.5)
-                    a.plot([onset["x"]], [onset["y"]], marker="o", ms=2.2, mfc="white", mec=color, mew=0.6 * lw, zorder=3)
-                    a.annotate(rich(onset_label(onset["T"], kind, opts)), (onset["x"], onset["y"]),
+                        for xs, ys in onset["lines"]:
+                            a.plot(to_axis(c, opts, xs), ys, color=MARKER_COLOR, lw=0.5 * lw, ls=(0, (2, 1.5)), zorder=1.5)
+                    a.plot([xo], [onset["y"]], marker="o", ms=2.2, mfc="white", mec=color, mew=0.6 * lw, zorder=3)
+                    a.annotate(rich(onset_label(onset["T"], kind, opts)), (xo, onset["y"]),
                                xytext=(-3, -3 if up else 3), textcoords="offset points", ha="right",
                                va="top" if up else "bottom", fontsize=opts.annotation_font_size, color=color,
                                bbox=dict(fc="white", ec="none", alpha=0.8, pad=0.4), zorder=4)
@@ -487,12 +592,13 @@ def render_mpl(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: str
                 if g is None:
                     continue
                 color = c.color2 if single and c.color2 else c.color
+                xg = to_axis(c, opts, [g["T"]])[0]
                 if opts.onset_lines:
-                    for xs, ys in (g["base_line"], g["tangent"]):
-                        a.plot(xs, ys, color=MARKER_COLOR, lw=0.5 * lw, ls=(0, (2, 1.5)), zorder=1.5)
-                a.plot([g["x"]], [g["y"]], marker="o", ms=2.2, mfc="white", mec=color, mew=0.6 * lw, zorder=3)
+                    for xs, ys in g["lines"]:
+                        a.plot(to_axis(c, opts, xs), ys, color=MARKER_COLOR, lw=0.5 * lw, ls=(0, (2, 1.5)), zorder=1.5)
+                a.plot([xg], [g["y"]], marker="o", ms=2.2, mfc="white", mec=color, mew=0.6 * lw, zorder=3)
                 label = f"{opts.tg_symbol.strip()} = " if opts.tg_symbol.strip() else ""
-                a.annotate(rich(label + _fmt_temp(g["T"], opts.peak_decimals)), (g["x"], g["y"]),
+                a.annotate(rich(label + _fmt_temp(g["T"], opts.peak_decimals)), (xg, g["y"]),
                            xytext=(-3, 3 if opts.exo_up else -3), textcoords="offset points", ha="right",
                            va="bottom" if opts.exo_up else "top", fontsize=opts.annotation_font_size, color=color,
                            bbox=dict(fc="white", ec="none", alpha=0.8, pad=0.4), zorder=4)
@@ -582,17 +688,15 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
                                        yshift=7 if up else -7, font=dict(size=opts.annotation_font_size, color=color))
                 if onset is None:
                     continue
+                xo = to_axis(c, opts, [onset["T"]])[0]
                 if opts.onset_lines:
-                    ba, bb = onset["baseline"]
-                    x_end = onset["x"] + (onset["y_peak"] - onset["y"]) / onset["slope"] * 0.85
-                    for xs, ys in (([onset["x_base_start"], onset["x"]], [ba * onset["x_base_start"] + bb, onset["y"]]),
-                                   ([onset["x"], x_end], [onset["y"], onset["y"] + onset["slope"] * (x_end - onset["x"])])):
-                        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", showlegend=False, hoverinfo="skip",
+                    for xs, ys in onset["lines"]:
+                        fig.add_trace(go.Scatter(x=to_axis(c, opts, xs), y=ys, mode="lines", showlegend=False, hoverinfo="skip",
                                                  line=dict(color=MARKER_COLOR, width=0.5 * lw, dash="dot")), **where["dta"])
-                fig.add_trace(go.Scatter(x=[onset["x"]], y=[onset["y"]], mode="markers", showlegend=False,
+                fig.add_trace(go.Scatter(x=[xo], y=[onset["y"]], mode="markers", showlegend=False,
                                          marker=dict(size=5, color="white", line=dict(color=color, width=1)),
                                          hovertemplate=f"onset {onset['T']:.1f} °C<extra></extra>"), **where["dta"])
-                fig.add_annotation(x=onset["x"], y=onset["y"], xref=xr, yref=yr, text=to_html(onset_label(onset["T"], kind, opts)),
+                fig.add_annotation(x=xo, y=onset["y"], xref=xr, yref=yr, text=to_html(onset_label(onset["T"], kind, opts)),
                                    showarrow=False, xanchor="right", xshift=-4, yshift=-7 if up else 7,
                                    font=dict(size=opts.annotation_font_size, color=color))
     if opts.tg_range and "dta" in signals:
@@ -602,16 +706,16 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
             if g is None:
                 continue
             color = c.color2 if single and c.color2 else c.color
+            xg = to_axis(c, opts, [g["T"]])[0]
             if opts.onset_lines:
-                for xs, ys in (g["base_line"], g["tangent"]):
-                    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", showlegend=False, hoverinfo="skip",
+                for xs, ys in g["lines"]:
+                    fig.add_trace(go.Scatter(x=to_axis(c, opts, xs), y=ys, mode="lines", showlegend=False, hoverinfo="skip",
                                              line=dict(color=MARKER_COLOR, width=0.5 * lw, dash="dot")), **where["dta"])
-            fig.add_trace(go.Scatter(x=[g["x"]], y=[g["y"]], mode="markers", showlegend=False,
+            fig.add_trace(go.Scatter(x=[xg], y=[g["y"]], mode="markers", showlegend=False,
                                      marker=dict(size=5, color="white", line=dict(color=color, width=1)),
-                                     hovertemplate=f"Tg onset {g['T']:.1f} °C, inflection {g['T_inflection']:.1f} °C<extra></extra>"),
-                          **where["dta"])
+                                     hovertemplate=f"Tg onset {g['T']:.1f} °C<extra></extra>"), **where["dta"])
             label = f"{opts.tg_symbol.strip()} = " if opts.tg_symbol.strip() else ""
-            fig.add_annotation(x=g["x"], y=g["y"], xref=xr, yref=yr, text=to_html(label + _fmt_temp(g["T"], opts.peak_decimals)),
+            fig.add_annotation(x=xg, y=g["y"], xref=xr, yref=yr, text=to_html(label + _fmt_temp(g["T"], opts.peak_decimals)),
                                showarrow=False, xanchor="right", xshift=-4, yshift=7 if opts.exo_up else -7,
                                font=dict(size=opts.annotation_font_size, color=color))
     if opts.exo_arrow and "dta" in signals:

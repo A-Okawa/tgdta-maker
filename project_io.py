@@ -60,6 +60,22 @@ def _pair(lo, hi):
     return check
 
 
+def _overrides(value) -> bool:
+    """Hand-drawn constructions: {file name: {feature id: {"base": [4 numbers], "tan": [4 numbers]}}}."""
+    if not isinstance(value, dict) or len(value) > 500:
+        return False
+    for sample, features in value.items():
+        if not isinstance(sample, str) or len(sample) > 255 or not isinstance(features, dict) or len(features) > 100:
+            return False
+        for fid, line in features.items():
+            if not isinstance(fid, str) or len(fid) > 40 or not isinstance(line, dict) or set(line) != {"base", "tan"}:
+                return False
+            for part in ("base", "tan"):
+                if not (isinstance(line[part], list) and len(line[part]) == 4 and all(_number(x) for x in line[part])):
+                    return False
+    return True
+
+
 SCHEMA = {
     "lang_radio": _choice("日本語", "English", "Tiếng Việt", "ไทย"),
     "layout": _choice("twin", "stack", "single"), "single_signal": _choice("tg", "dtg", "dta"),
@@ -84,7 +100,7 @@ SCHEMA = {
     "show_peaks": _bool, "peak_kind": _choice("both", "exo", "endo"), "peak_prom": _num(0.01, 0.9),
     "peak_distance": _num(0.0, 1000.0), "peak_decimals": _num(0, 2, True),
     "peak_mode": _choice("peak", "onset", "both"), "onset_lines": _bool, "onset_symbol_exo": _text, "onset_symbol_endo": _text,
-    "mirror_ticks": _bool, "show_tg": _bool, "tg_range": _text, "tg_symbol": _text,
+    "mirror_ticks": _bool, "onset_overrides": _overrides, "show_tg": _bool, "tg_range": _text, "tg_symbol": _text,
     "mass_ranges": _text, "mass_decimals": _num(0, 3, True), "mass_lines": _bool,
     "markers": _text, "panel_gap": _num(0.0, 0.5),
     "fig_width": _num(25 / 25.4, 20.0), "fig_height": _num(25 / 25.4, 20.0),

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<!-- TG-DTA Maker: drag the baseline and tangent of a Tx / Tg construction (a Streamlit component without a build step).
+     Streamlit loads this page in an iframe and talks to it with postMessage (component API v1). -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; color: #31333F;
+               font-family: "Source Sans Pro", "Helvetica Neue", Arial, sans-serif; font-size: 14px; }
+  #info { padding: 2px 4px 6px; min-height: 1.2em; }
+  #info b { font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="plot"></div>
+<div id="info"></div>
+<script>
+"use strict";
+const send = (type, data) => window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data || {}), "*");
+let current = null;          // the args of the drawn construction
+let drawnToken = null;
+
+function intersect(a, b) {
+  const [x0, y0, x1, y1] = a, [u0, v0, u1, v1] = b;
+  const d = (x0 - x1) * (v0 - v1) - (y0 - y1) * (u0 - u1);
+  if (Math.abs(d) < 1e-15) return null;
+  const p = x0 * y1 - y0 * x1, q = u0 * v1 - v0 * u1;
+  return [(p * (u0 - u1) - (x0 - x1) * q) / d, (p * (v0 - v1) - (y0 - y1) * q) / d];
+}
+
+function linesOf(gd) {
+  return gd.layout.shapes.slice(0, 2).map(s => [s.x0, s.y0, s.x1, s.y1].map(Number));
+}
+
+function showCrossing(gd, final) {
+  const [base, tan] = linesOf(gd);
+  const p = intersect(base, tan);
+  const info = document.getElementById("info");
+  if (p === null || !isFinite(p[0])) {
+    info.textContent = current.text_parallel;
+    return;
+  }
+  Plotly.restyle(gd, { x: [[p[0]]], y: [[p[1]]] }, [1]);
+  info.innerHTML = `<b>${current.label} = ${p[0].toFixed(1)} °C</b> &nbsp; ${current.text_hint}`;
+  if (final) {
+    send("streamlit:setComponentValue", {
+      value: { token: current.token, sample: current.sample, feature: current.feature, base, tan, T: p[0] },
+      dataType: "json",
+    });
+  }
+}
+
+function draw(args) {
+  current = args;
+  drawnToken = args.token;
+  const line = (l, color) => ({ type: "line", xref: "x", yref: "y", x0: l[0], y0: l[1], x1: l[2], y1: l[3],
+                                editable: true, line: { color, width: 2.5, dash: "dash" } });
+  const p = intersect(args.base, args.tan) || [NaN, NaN];
+  const layout = {
+    height: args.height, margin: { l: 64, r: 16, t: 10, b: 46 },
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "white",
+    font: { family: "Arial, sans-serif", size: 12, color: "black" },
+    xaxis: { title: { text: "Temperature (°C)" }, range: args.xrange, showline: true, linecolor: "black",
+             mirror: true, ticks: "outside", showgrid: true, gridcolor: "#eee", zeroline: false },
+    yaxis: { title: { text: args.ylabel }, range: args.yrange, showline: true, linecolor: "black",
+             mirror: true, ticks: "outside", showgrid: true, gridcolor: "#eee", zeroline: false },
+    shapes: [line(args.base, "#4D4D4D"), line(args.tan, "#CC3311")],
+    showlegend: false, dragmode: "pan", hovermode: "closest",
+  };
+  const data = [
+    { x: args.T, y: args.y, mode: "lines", line: { color: args.color, width: 1.6 },
+      hovertemplate: "%{x:.1f} °C<br>%{y:.4g}<extra></extra>" },
+    { x: [p[0]], y: [p[1]], mode: "markers", marker: { size: 9, color: "white", line: { color: args.color, width: 2 } },
+      hoverinfo: "skip" },
+  ];
+  const config = { edits: { shapePosition: true }, displaylogo: false, responsive: true, scrollZoom: true,
+                   modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"] };
+  const gd = document.getElementById("plot");
+  // The iframe starts 0 px tall: give the plot its own height and tell Streamlit the total right away,
+  // rather than measuring a page that has not been laid out yet.
+  gd.style.height = args.height + "px";
+  send("streamlit:setFrameHeight", { height: args.height + 34 });
+  Plotly.newPlot(gd, data, layout, config).then(() => {
+    showCrossing(gd, false);
+    gd.on("plotly_relayout", ev => {
+      // Only the end of a drag of one of the two lines; zoom and pan change the axes, not the shapes.
+      if (Object.keys(ev).some(k => k.startsWith("shapes"))) showCrossing(gd, true);
+    });
+    send("streamlit:setFrameHeight", { height: Math.max(args.height + 34, document.body.scrollHeight + 4) });
+  });
+}
+
+window.addEventListener("message", ev => {
+  if (!ev.data || ev.data.type !== "streamlit:render") return;
+  const args = ev.data.args;
+  // A rerun sends the same args again: keep the lines where the user left them.
+  if (args.token === drawnToken) return;
+  draw(args);
+});
+
+function start() { send("streamlit:componentReady", { apiVersion: 1 }); }
+
+// Plotly from the app's own folder (copied from the Python plotly package, works offline);
+// from the Plotly CDN if that copy is missing.
+const local = document.createElement("script");
+local.src = "plotly.min.js";
+local.onload = start;
+local.onerror = () => {
+  const cdn = document.createElement("script");
+  cdn.src = "https://cdn.plot.ly/plotly-3.1.1.min.js";
+  cdn.onload = start;
+  document.head.appendChild(cdn);
+};
+document.head.appendChild(local);
+</script>
+</body>
+</html>

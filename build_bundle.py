@@ -11,7 +11,8 @@ import zipfile
 
 
 BUNDLE_FILES = (
-    "app.py", "requirements.txt", "tgdta_io.py", "tgdta_plot.py", "project_io.py", "figure_style.py",
+    "app.py", "requirements.txt", "tgdta_io.py", "tgdta_plot.py", "onset_editor.py", "onset_editor/index.html",
+    "project_io.py", "figure_style.py",
     "style_templates.py", "palettes.py", "rich_text.py", "i18n.py", "colors.csv",
     "fonts/LiberationSans-Regular.ttf", "fonts/LiberationSans-Bold.ttf",
     "fonts/LiberationSans-Italic.ttf", "fonts/LiberationSans-BoldItalic.ttf",

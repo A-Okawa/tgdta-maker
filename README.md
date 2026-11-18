@@ -19,6 +19,9 @@ XRD Maker・Raman Maker・UV-Vis-NIR Maker・グラフ描画app（figapp）と�
 - **DTA**：初期値は「DTA (a.u.)」（目盛りの数値なし）。発熱を上／下、装置の符号（発熱が＋／−）、μV で描くときは質量で割る (μV mg⁻¹)、始点を 0 に、試料ごとの縦の位置。
 - **ピーク温度と Tx**：DTA の頂点（Tp）と、補外開始温度（ピーク前のベースラインと立ち上がりの変曲点での接線の交点。
   ISO 11357・ASTM E794 の作図。結晶化ピークなら Tx）。接線とベースラインも描けます。
+- **接線を手で直す**：「Tx・Tg の接線を直す」タブで、ベースラインと接線を Plotly 上でドラッグして引き直せます。
+  交点の温度は図・数値の一覧（値の後ろに *）・作業ファイルに入り、「この線を自動に戻す」で元に戻せます。
+  部品（`onset_editor/index.html`）はアプリの中にあり、Streamlit が配信するので、別に配る必要はありません。
 - **注記**：Exo. の矢印、温度範囲ごとの質量変化（例：−5.8%）、縦線（位置 | 文字）。
 - **数値の一覧**：昇温速度・全体の質量変化・発熱/吸熱ピーク・補外開始温度（Tx）・範囲ごとの質量変化。描いた値は CSV で保存できます。
 - **保存**：PDF・SVG（文字を編集可能）・TIFF・PNG（300 / 600 dpi）、作業ファイル（.json）、作図スタイル（.json。XRD Maker のスタイルも開けます）。
@@ -40,6 +43,7 @@ XRD Maker・Raman Maker・UV-Vis-NIR Maker・グラフ描画app（figapp）と�
 | `app.py` | 画面（サイドバー・試料パネル・プレビュー） |
 | `tgdta_io.py` | 読み込み・昇温部の判定・TG/DTG/DTA の計算・ピーク検出 |
 | `tgdta_plot.py` | 論文用の図（matplotlib）とインタラクティブ表示（Plotly） |
+| `onset_editor.py`・`onset_editor/index.html` | 接線とベースラインをドラッグで直す部品（Plotly はインストール済みの plotly から自動でコピー） |
 | `project_io.py`・`style_templates.py` | 作業ファイル・作図スタイルの保存と読み込み（値の検査つき） |
 | `i18n.py` | ベトナム語・タイ語の画面の文字 |
 | `desktop.py`・`setup_local.py`・`build_bundle.py`・`setup_*`・`launch_*` | PC 版 |
