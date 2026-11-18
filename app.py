@@ -21,7 +21,8 @@ def _reload_own_modules():
     import hashlib
     import importlib
     import sys
-    names = ("figure_style", "palettes", "rich_text", "i18n", "project_io", "style_templates", "tgdta_io", "tgdta_plot")
+    names = ("figure_style", "palettes", "rich_text", "i18n", "project_io", "style_templates", "tgdta_io", "tgdta_plot",
+             "onset_editor")
     app_dir = Path(__file__).resolve().parent
 
     def digest(name):
