@@ -514,12 +514,11 @@ _xt[1].checkbox(ui("副目盛り", "Minor ticks"), key="x_minor")
 st.sidebar.caption(ui("横軸のラベルは下の「軸のラベル」で変えられます。", "Change the x-axis title under 'Axis labels' below."))
 
 st.sidebar.subheader(ui("枠と目盛り", "Frame and ticks"))
-_fc = st.sidebar.columns(2)
-_fc[0].checkbox(ui("枠線を全て描く", "Full frame"), key="axes_box",
+st.sidebar.checkbox(ui("枠線を全て描く", "Full frame"), key="axes_box",
                 help=ui("上と右の枠線も描きます。グラフ描画appの初期値は上と右なしです。",
                         "Also draws the top and right lines. The graph app's default has neither."))
 if st.session_state["axes_box"]:
-    _fc[1].checkbox(ui("上・右にも目盛り", "Ticks on all sides"), key="mirror_ticks",
+    st.sidebar.checkbox(ui("上・右にも目盛り", "Ticks on all sides"), key="mirror_ticks",
                     help=ui("左右の軸の図では、右は DTA の軸なので上にだけ付けます。",
                             "In the two-axis plot the right side is the DTA axis, so only the top gets ticks."))
 
@@ -556,6 +555,12 @@ st.sidebar.checkbox(ui("基準の温度で 0 にそろえる", "Zero at a refere
 if st.session_state["tg_ref_on"]:
     st.sidebar.number_input(ui("基準の温度 (°C)", "Reference temperature (°C)"), step=10.0, format="%.1f", key="tg_ref_temp")
 st.sidebar.number_input(ui("TG の平滑化（点数、0 = なし）", "TG smoothing (points, 0 = none)"), 0, 201, step=2, key="tg_smooth")
+if "tg" in signals_shown:
+    _tr = st.sidebar.columns(2)
+    _tr[0].text_input(ui("TG 縦軸の最小", "TG axis min"), key="y_tg_lo", placeholder=ui("自動", "auto"),
+                      help=ui("空欄なら自動。片方だけでも指定できます。単位は TG の表し方（% または mg）に合わせます。",
+                              "Empty = automatic; either end alone is fine. In the unit of 'TG as' (% or mg)."))
+    _tr[1].text_input(ui("TG 縦軸の最大", "TG axis max"), key="y_tg_hi", placeholder=ui("自動", "auto"))
 
 st.sidebar.subheader("DTA")
 _dc = st.sidebar.columns(2)
@@ -583,8 +588,8 @@ if "dtg" in signals_shown:
                                     "Differentiation amplifies balance noise, so TG is smoothed (Savitzky–Golay) first. "
                                     "At 0.05 min spacing, 31 points ≈ 1.5 min."))
 
-with st.sidebar.expander(ui("縦軸の範囲（空欄 = 自動）", "y ranges (empty = automatic)")):
-    for _s in signals_shown:
+with st.sidebar.expander(ui("DTA・DTG の縦軸の範囲（空欄 = 自動）", "DTA / DTG y ranges (empty = automatic)")):
+    for _s in [s for s in signals_shown if s != "tg"]:
         _yc = st.columns(2)
         _yc[0].text_input(f"{_s.upper()} " + ui("下限", "from"), key=f"y_{_s}_lo")
         _yc[1].text_input(f"{_s.upper()} " + ui("上限", "to"), key=f"y_{_s}_hi")

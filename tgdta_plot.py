@@ -750,6 +750,8 @@ def render_plotly(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: 
         kw = dict(title_text=to_html(label_of(s, curves, opts, tg_mode)))
         if lo is not None and hi is not None:
             kw["range"] = [lo, hi]
+        elif lo is not None or hi is not None:
+            kw.update(range=[lo, hi], autorange="max" if hi is None else "min")   # one end fixed, the other automatic
         if opts.layout == "twin":
             kw.update(mirror=False)          # the right side belongs to the second axis
         if s == "dta" and opts.dta_au:
