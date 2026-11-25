@@ -146,7 +146,7 @@ DEFAULTS = {
     "peak_mode": "peak", "onset_lines": True, "show_tg": False, "tg_range": "", "tg_symbol": "<i>T</i>_{g}", "onset_symbol_exo": "<i>T</i>_{x}", "onset_symbol_endo": "", "peak_prom": 0.1, "peak_distance": 30.0, "peak_decimals": 0,
     "mass_ranges": "", "mass_decimals": 1, "mass_lines": True, "markers": "", "panel_gap": 0.06,
     "palette": DEFAULT_PALETTE, "palette_reverse": False, "show_panel": True,
-    "dpi_export": 600, "size_unit": "mm", "annotation_font_size": 6.0,
+    "dpi_export": 600, "size_unit": "mm", "annotation_font_size": 6.0, "auto_margins": True,
 }
 LEGEND_LOCS = ["best", "upper right", "upper left", "lower left", "lower right", "center right", "center left"]
 CORNERS = ["upper left", "upper right", "lower left", "lower right"]
@@ -725,11 +725,19 @@ with st.sidebar.expander(ui("線・フォント・余白", "Lines, fonts and mar
                                         "in": ui("内向き", "Inward"), "out": ui("外向き", "Outward")}[v])
     if st.session_state["layout"] == "stack":
         st.slider(ui("パネルの間隔", "Space between panels"), 0.0, 0.5, step=0.01, key="panel_gap")
+    st.checkbox(ui("余白を自動で詰める（文字に合わせる）", "Fit margins to the labels automatically"), key="auto_margins",
+                help=ui("軸ラベル・目盛りの数値・凡例が収まるぎりぎりまで余白を詰めます。図の寸法は変わらず、軸の枠が広がります。"
+                        "DTA (a.u.) のように目盛りの数値がない軸でも空白が残りません。複数の図で軸の枠の大きさをそろえたいときは外して、"
+                        "下の数値で余白を固定してください。",
+                        "Shrinks the margins to just hold the axis titles, tick labels and legend; the figure size stays, the axes grow. "
+                        "No empty band is left beside an axis without tick values such as DTA (a.u.). To give several figures the same "
+                        "axes frame, untick it and fix the margins below."))
     for _key, _label in (("margin_left", ui("左余白 (%)", "Left margin (%)")), ("margin_right", ui("右余白 (%)", "Right margin (%)")),
                          ("margin_bottom", ui("下余白 (%)", "Bottom margin (%)")), ("margin_top", ui("上余白 (%)", "Top margin (%)"))):
         _fraction = st.session_state[_key]
         st.session_state[f"_percent_{_key}"] = round(100 * (1 - _fraction if _key in ("margin_right", "margin_top") else _fraction), 8)
-        st.number_input(_label, 0., 100., step=1., key=f"_percent_{_key}", on_change=_update_margin, args=(_key,))
+        st.number_input(_label, 0., 100., step=1., key=f"_percent_{_key}", on_change=_update_margin, args=(_key,),
+                        disabled=bool(st.session_state["auto_margins"]))
     st.checkbox(ui("背景を透明にする", "Transparent background"), key="transparent_background")
     st.checkbox(ui("SVGの文字を編集可能にする", "Keep SVG text editable"), key="svg_text_editable")
 plot_style = {k: st.session_state[k] for k in STYLE_KEYS}
@@ -899,7 +907,7 @@ if measurements and col_graph is not None:
         onset_symbol_exo=state["onset_symbol_exo"], onset_symbol_endo=state["onset_symbol_endo"],
         mirror_ticks=bool(state["mirror_ticks"]) and bool(plot_style["axes_box"]),
         tg_range=(parse_ranges(state["tg_range"]) or [None])[0] if state["show_tg"] else None,
-        tg_symbol=state["tg_symbol"], overrides=overrides, mass_ranges=parse_ranges(state["mass_ranges"]),
+        tg_symbol=state["tg_symbol"], overrides=overrides, auto_margins=bool(state["auto_margins"]), mass_ranges=parse_ranges(state["mass_ranges"]),
         mass_decimals=int(state["mass_decimals"]), mass_lines=state["mass_lines"], markers=parse_markers(state["markers"]),
         panel_gap=float(state["panel_gap"]), fig_width=state["fig_width"], fig_height=state["fig_height"],
     )
@@ -933,19 +941,21 @@ if measurements and col_graph is not None:
             tab_live, tab_export, tab_numbers, tab_adjust = st.tabs([
                 ui("インタラクティブ", "Interactive"), ui("出力プレビュー", "Export preview"), ui("数値の一覧", "Numbers"),
                 ui("Tx・Tg の接線を直す", "Adjust Tx / Tg tangents")])
+            fig, render_notes = render_mpl(curves, opts, plot_style, state["tg_mode"])
+            # With automatic margins the figure carries the margins fitted to its labels: export with those.
+            fig_style = getattr(fig, "tgdta_style", plot_style)
             with tab_live:
                 st.caption(ui("ドラッグで拡大、ダブルクリックで元に戻ります。曲線に重ねると温度・時間・値が出ます。",
                               "Drag to zoom, double-click to reset. Hover a curve for temperature, time and value."))
-                st.plotly_chart(render_plotly(curves, opts, plot_style, state["tg_mode"]), **FULL_WIDTH["plotly_chart"],
+                st.plotly_chart(render_plotly(curves, opts, fig_style, state["tg_mode"]), **FULL_WIDTH["plotly_chart"],
                                 config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
-            fig, render_notes = render_mpl(curves, opts, plot_style, state["tg_mode"])
             dpi = int(state["dpi_export"])
-            png_preview = export_figure(fig, "png", 200, style=plot_style)
-            pdf_bytes = export_figure(fig, "pdf", dpi, style=plot_style)
-            svg_bytes = export_figure(fig, "svg", dpi, style=plot_style)
+            png_preview = export_figure(fig, "png", 200, style=fig_style)
+            pdf_bytes = export_figure(fig, "pdf", dpi, style=fig_style)
+            svg_bytes = export_figure(fig, "svg", dpi, style=fig_style)
             raster_ok = state["fig_width"] * state["fig_height"] * dpi ** 2 <= 36_000_000
-            png_bytes = export_figure(fig, "png", dpi, style=plot_style) if raster_ok else None
-            tiff_bytes = export_figure(fig, "tiff", dpi, style=plot_style) if raster_ok else None
+            png_bytes = export_figure(fig, "png", dpi, style=fig_style) if raster_ok else None
+            tiff_bytes = export_figure(fig, "tiff", dpi, style=fig_style) if raster_ok else None
             plt.close(fig)
             for _note in render_notes:
                 if _note.startswith("unit_mismatch:"):

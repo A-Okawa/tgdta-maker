@@ -100,7 +100,7 @@ SCHEMA = {
     "show_peaks": _bool, "peak_kind": _choice("both", "exo", "endo"), "peak_prom": _num(0.01, 0.9),
     "peak_distance": _num(0.0, 1000.0), "peak_decimals": _num(0, 2, True),
     "peak_mode": _choice("peak", "onset", "both"), "onset_lines": _bool, "onset_symbol_exo": _text, "onset_symbol_endo": _text,
-    "mirror_ticks": _bool, "onset_overrides": _overrides, "show_tg": _bool, "tg_range": _text, "tg_symbol": _text,
+    "mirror_ticks": _bool, "auto_margins": _bool, "onset_overrides": _overrides, "show_tg": _bool, "tg_range": _text, "tg_symbol": _text,
     "mass_ranges": _text, "mass_decimals": _num(0, 3, True), "mass_lines": _bool,
     "markers": _text, "panel_gap": _num(0.0, 0.5),
     "fig_width": _num(25 / 25.4, 20.0), "fig_height": _num(25 / 25.4, 20.0),

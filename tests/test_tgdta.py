@@ -238,6 +238,24 @@ class Figures(unittest.TestCase):
         self.assertEqual(ax.lines[0].get_linewidth(), 0.9)
         plt.close(fig)
 
+    def test_margins_fit_the_labels(self):
+        # DTA (a.u.) has no tick values: the left margin shrinks to the axis title, and nothing leaves the canvas.
+        from matplotlib.transforms import Bbox
+        for opts in (PlotOptions(layout="stack", panels=("dta",)), PlotOptions(), PlotOptions(layout="stack", panels=("tg", "dta"))):
+            fig, _ = render_mpl(self.curves(), opts, FIGAPP_STYLE)
+            fitted = fig.tgdta_style
+            fig.canvas.draw()
+            ink = Bbox.union([a.get_tightbbox(fig.canvas.get_renderer()) for a in fig.axes]).transformed(fig.transFigure.inverted())
+            self.assertGreaterEqual(ink.x0, -1e-3)
+            self.assertLessEqual(ink.x1, 1 + 1e-3)
+            self.assertGreaterEqual(ink.y0, -1e-3)
+            if opts.panels == ("dta",):
+                self.assertLess(fitted["margin_left"], 0.08)
+            plt.close(fig)
+        fig, _ = render_mpl(self.curves(), PlotOptions(auto_margins=False), FIGAPP_STYLE)
+        self.assertEqual(fig.tgdta_style["margin_left"], FIGAPP_STYLE["margin_left"])
+        plt.close(fig)
+
     def test_dta_in_arbitrary_units_by_default(self):
         fig, _ = render_mpl(self.curves()[:1], PlotOptions(), FIGAPP_STYLE)
         dta_axis = fig.axes[1]

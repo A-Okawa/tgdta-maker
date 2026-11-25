@@ -774,6 +774,12 @@ _INLINE = [
     ("DTA / DTG y ranges (empty = automatic)",
      "Khoảng trục y của DTA / DTG (để trống = tự động)",
      "ช่วงแกน y ของ DTA / DTG (เว้นว่าง = อัตโนมัติ)"),
+    ("Fit margins to the labels automatically",
+     "Tự động thu lề vừa với chữ",
+     "ปรับขอบให้พอดีกับตัวอักษรอัตโนมัติ"),
+    ("Shrinks the margins to just hold the axis titles, tick labels and legend; the figure size stays, the axes grow. No empty band is left beside an axis without tick values such as DTA (a.u.). To give several figures the same axes frame, untick it and fix the margins below.",
+     "Thu lề vừa đủ chứa tên trục, số trên vạch chia và chú giải; kích thước hình giữ nguyên, khung trục rộng ra. Không còn khoảng trống bên trục không có số như DTA (a.u.). Để nhiều hình có cùng khung trục, hãy bỏ chọn và cố định lề bằng các số bên dưới.",
+     "ลดขอบให้พอดีกับชื่อแกน ตัวเลขบนขีดสเกล และคำอธิบายแผนภูมิ ขนาดรูปคงเดิมแต่กรอบแกนกว้างขึ้น จะไม่มีที่ว่างข้างแกนที่ไม่มีตัวเลข เช่น DTA (a.u.) หากต้องการให้หลายรูปมีกรอบแกนเท่ากัน ให้ยกเลิกแล้วกำหนดขอบด้วยตัวเลขด้านล่าง"),
 ]
 
 # The colour names of colors.csv as the graph app writes them, shown translated in the colour list.

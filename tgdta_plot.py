@@ -88,6 +88,7 @@ class PlotOptions:
     # Hand-adjusted constructions: {curve key: {feature id: {"base": [T0, y0, T1, y1], "tan": [...]}}},
     # in °C and DTA without offset; feature id "exo@1081" (kind@peak °C, matched within 10 °C) or "tg".
     overrides: dict = field(default_factory=dict)
+    auto_margins: bool = True             # fit the margins to the labels actually drawn (canvas size unchanged)
     mass_ranges: list = field(default_factory=list)  # [(lo °C, hi °C)]
     mass_decimals: int = 1
     mass_lines: bool = True
@@ -404,6 +405,36 @@ def x_limits(curves: list[Curve], opts: PlotOptions) -> tuple[float, float]:
 
 
 # ------------------------------------------------------------------------------------------------ matplotlib
+def fit_margins(fig, style: dict, pad_pt: float = 3.0, passes: int = 2) -> dict:
+    """Margins that just hold the axis labels, tick labels, legend and annotations, with ``pad_pt`` to spare.
+
+    The canvas keeps its size; the axes grow into space that fixed margins would leave empty (for
+    example the left margin of a DTA (a.u.) plot without tick values). Returns the style with the new
+    margins, already applied to ``fig``."""
+    from matplotlib.transforms import Bbox
+    style = dict(style)
+    for _ in range(passes):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        axes = [a for a in fig.axes if a.get_visible()]
+        if not axes:
+            return style
+        frame = Bbox.union([a.get_position() for a in axes])
+        ink = Bbox.union([a.get_tightbbox(renderer) for a in axes]).transformed(fig.transFigure.inverted())
+        pad_x = pad_pt / 72 / fig.get_figwidth()
+        pad_y = pad_pt / 72 / fig.get_figheight()
+        left = frame.x0 - ink.x0 + pad_x
+        right = 1 - (ink.x1 - frame.x1 + pad_x)
+        bottom = frame.y0 - ink.y0 + pad_y
+        top = 1 - (ink.y1 - frame.y1 + pad_y)
+        left, bottom = min(max(left, 0.005), 0.45), min(max(bottom, 0.005), 0.45)
+        right, top = max(min(right, 0.995), left + 0.2), max(min(top, 0.995), bottom + 0.2)
+        style.update(margin_left=round(float(left), 4), margin_right=round(float(right), 4),
+                     margin_bottom=round(float(bottom), 4), margin_top=round(float(top), 4))
+        apply_mpl_style(fig, style)
+    return style
+
+
 def _style_axis(ax, opts, style, *, x=True, right=False):
     direction = style["tick_direction"] if style["tick_direction"] in ("in", "out") else "out"
     length = style["tick_length"]
@@ -615,6 +646,8 @@ def render_mpl(curves: list[Curve], opts: PlotOptions, style: dict, tg_mode: str
         if opts.layout != "twin":
             fig.align_ylabels(panels)
         apply_mpl_style(fig, style)
+        # The style used to draw, with the fitted margins: pass it to export_figure, which applies margins again.
+        fig.tgdta_style = fit_margins(fig, style) if opts.auto_margins else style
     return fig, notes
 
 
