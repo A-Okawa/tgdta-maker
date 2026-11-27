@@ -156,9 +156,15 @@ class Processing(unittest.TestCase):
         self.assertIn("no_mass", p.notes)
 
     def test_reference_temperature(self):
-        p = process(self.m, mass_mg=20.0, tg_ref_temp=400.0)
+        heating = heating_segment(self.m.time_min(), self.m.column("temp"))
+        p = process(self.m, time_range=heating, mass_mg=20.0, tg_ref_temp=400.0)
         i = int(np.argmin(np.abs(p.T - 400)))
         self.assertAlmostEqual(p.tg[i], 0.0, delta=0.02)
+        # With the hold at the top temperature a temperature does not pick one point: the first point is used, and said so.
+        q = process(self.m, mass_mg=20.0, tg_ref_temp=400.0)
+        self.assertEqual(q.profile["status"], "hold")
+        self.assertIn("ref_not_evaluated", q.notes)
+        self.assertAlmostEqual(q.tg[0], 0.0)
 
     def test_peaks_and_flip(self):
         for sign in (1.0, -1.0):

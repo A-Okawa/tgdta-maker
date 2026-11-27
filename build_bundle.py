@@ -11,7 +11,7 @@ import zipfile
 
 
 BUNDLE_FILES = (
-    "app.py", "requirements.txt", "tgdta_io.py", "tgdta_plot.py", "onset_editor.py", "onset_editor/index.html",
+    "app.py", "requirements.txt", "tgdta_io.py", "tgdta_plot.py", "tgdta_qc.py", "onset_editor.py", "onset_editor/index.html",
     "project_io.py", "figure_style.py",
     "style_templates.py", "palettes.py", "rich_text.py", "i18n.py", "colors.csv",
     "fonts/LiberationSans-Regular.ttf", "fonts/LiberationSans-Bold.ttf",
@@ -23,6 +23,21 @@ BUNDLE_FILES = (
     "setup_windows.bat", "launch_windows.bat",
 )
 BUNDLE_ROOT = "TG-DTA-Maker"
+
+
+def _version(source: Path) -> str:
+    """Commit date and short hash of the source (as the app shows it), or 'unknown' without git."""
+    import subprocess
+    try:
+        head = subprocess.run(["git", "-C", str(source), "log", "-1", "--format=%cs %h"], capture_output=True, text=True,
+                              timeout=3)
+        if head.returncode == 0 and head.stdout.strip():
+            dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+                                   capture_output=True, text=True, timeout=3)
+            return head.stdout.strip() + (" +local changes" if dirty.returncode == 0 and dirty.stdout.strip() else "")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
 
 
 def create_bundle_bytes(source_dir: Path | str | None = None, wheelhouse: Path | str | None = None) -> bytes:
@@ -61,6 +76,8 @@ def create_bundle_bytes(source_dir: Path | str | None = None, wheelhouse: Path |
             archive.writestr(info, data)
             manifest["files_sha256"][name] = hashlib.sha256(data).hexdigest()
         archive.writestr(f"{BUNDLE_ROOT}/BUNDLE_MANIFEST.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+        # The desktop edition has no git history: record the version it was made from.
+        archive.writestr(f"{BUNDLE_ROOT}/VERSION", _version(source) + "\n")
     return result.getvalue()
 
 

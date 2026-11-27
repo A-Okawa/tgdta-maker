@@ -25,6 +25,20 @@ XRD Maker・Raman Maker・UV-Vis-NIR Maker・グラフ描画app（figapp）と�
 - **注記**：Exo. の矢印、温度範囲ごとの質量変化（例：−5.8%）、縦線（位置 | 文字）。
 - **数値の一覧**：昇温速度・全体の質量変化・発熱/吸熱ピーク・補外開始温度（Tx）・範囲ごとの質量変化。描いた値は CSV で保存できます。
 - **保存**：PDF・SVG（文字を編集可能）・TIFF・PNG（300 / 600 dpi）、作業ファイル（.json）、作図スタイル（.json。XRD Maker のスタイルも開けます）。
+- **解析の信頼性（QC）**：「解析の信頼性（QC）」タブで、試料ごとに PASS・CAUTION・WARNING・FAIL・NOT EVALUATED の
+  5 段階で判定します（総合は最も悪い判定。必須の項目を評価できなければ NOT EVALUATED で、PASS にはしません）。
+  見るのは、読み込みで除いた行・時間の向き・サンプリング間隔・描く区間の温度の向き・m₀・TG の物理的妥当性・
+  ピークと Tg の段の S/N・作図条件を変えたときの Tx・Tg の幅・平滑化の影響・手で引いた線・発熱直後の吸熱です。
+  データや値は一切変えません。判定・自動処理・設定・ファイルの SHA-256・版は JSON と CSV で保存できます。
+  頑健性などの閾値は暫定値で、`tgdta_qc.THRESHOLDS` にまとめてあります。
+
+## データの扱い
+- 読み込みで、空欄・NaN・文字のセルや列の数が違う行は**その行だけ除き**、行番号を画面と QC に出します。
+  値の補間はしません（以前は、そこで表が途中で切れていました）。
+- 描く区間が冷却や保持を含むと 1 つの温度が 1 点に決まらないため、温度で読む値（Tp・Tx・Tg・質量変化）は出さず、
+  理由を表示します（曲線は描きます）。冷却は最高値から 2 K を超える低下、保持は昇温の後 1 min を超える部分です。
+- 平滑化の幅は点数で指定し、その時間・温度での幅（例：31 点 ≈ 1.50 min ≈ 22.8 K）をサイドバーに出します。
+- 画面左上の版（Last updated）は git の最新コミットの日付と短いハッシュです（PC 版は ZIP に書いた VERSION）。
 
 ## 共通ファイル
 `figure_style.py`・`palettes.py`・`rich_text.py`・`colors.csv`・`fonts/` は XRD Maker と同じファイルです。
@@ -35,7 +49,7 @@ XRD Maker・Raman Maker・UV-Vis-NIR Maker・グラフ描画app（figapp）と�
 - 手元：`pip install -r requirements.txt` → `streamlit run app.py`
 - PC 版（ターミナル不要）：サイドバー下の「PC 版をダウンロード」の ZIP を展開し、`setup_*` → `launch_*` を開く。
 - Streamlit Community Cloud：Main file に `app.py`。Secrets に `password = "…"` を書くと最初にパスワードを聞きます。
-- テスト：`python -m pytest tests`
+- テスト：`python -m pytest tests`（`tests/test_tgdta_qc.py` は読み込み・温度の向き・QC を、答えの分かっている人工データで確かめます）
 
 ## ファイル
 | ファイル | 中身 |
@@ -43,6 +57,7 @@ XRD Maker・Raman Maker・UV-Vis-NIR Maker・グラフ描画app（figapp）と�
 | `app.py` | 画面（サイドバー・試料パネル・プレビュー） |
 | `tgdta_io.py` | 読み込み・昇温部の判定・TG/DTG/DTA の計算・ピーク検出 |
 | `tgdta_plot.py` | 論文用の図（matplotlib）とインタラクティブ表示（Plotly） |
+| `tgdta_qc.py` | 解析の信頼性（QC）の判定・閾値・4 か国語の文言・レポート |
 | `onset_editor.py`・`onset_editor/index.html` | 接線とベースラインをドラッグで直す部品（Plotly はインストール済みの plotly から自動でコピー） |
 | `project_io.py`・`style_templates.py` | 作業ファイル・作図スタイルの保存と読み込み（値の検査つき） |
 | `i18n.py` | ベトナム語・タイ語の画面の文字 |

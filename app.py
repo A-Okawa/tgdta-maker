@@ -22,7 +22,7 @@ def _reload_own_modules():
     import importlib
     import sys
     names = ("figure_style", "palettes", "rich_text", "i18n", "project_io", "style_templates", "tgdta_io", "tgdta_plot",
-             "onset_editor")
+             "tgdta_qc", "onset_editor")
     app_dir = Path(__file__).resolve().parent
 
     def digest(name):
@@ -54,13 +54,35 @@ from project_io import (GLOBAL_KEYS, SAMPLE_KEY, ProjectError, atomic_save, clea
                         encode_project, is_setting_key, project_fingerprint)
 from rich_text import plain
 from style_templates import decode_style_template, encode_style_template
-from tgdta_io import (SIGNALS, SUPPORTED_EXTENSIONS, TGDTAParseError, heating_segment, parse_markers,
-                      parse_ranges, process, processed_table, read_measurement)
+from tgdta_io import (SIGNALS, SUPPORTED_EXTENSIONS, TGDTAParseError, heating_rate, heating_segment, parse_markers,
+                      parse_ranges, process, processed_table, read_measurement, temperature_based_ok)
 from onset_editor import onset_editor
-from tgdta_plot import (Curve, PlotOptions, auto_label, editable_features, feature_rows, glass_info, render_mpl,
+from tgdta_plot import (Curve, PlotOptions, auto_label, editable_features, feature_rows, glass_info, mass_issues, render_mpl,
                         render_plotly, shown_signals)
+from tgdta_qc import ICONS as QC_ICONS, THRESHOLDS, build_report, check_texts, evaluate, processing_steps, smoothing_span, \
+    text as qc_text
 
-APP_VERSION = "2026-11-11"
+
+def app_version():
+    """The version that is running: the date and short hash of the git commit (with '+local changes' when
+    the files differ from it), or the VERSION file written into the desktop ZIP; 'unknown' otherwise."""
+    import subprocess
+    here = Path(__file__).resolve().parent
+    try:
+        run = lambda *a: subprocess.run(["git", "-C", str(here), *a], capture_output=True, text=True, timeout=3)
+        head = run("log", "-1", "--format=%cs %h")
+        if head.returncode == 0 and head.stdout.strip():
+            dirty = run("status", "--porcelain", "--untracked-files=no")
+            return head.stdout.strip() + (" +local changes" if dirty.returncode == 0 and dirty.stdout.strip() else "")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return (here / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+APP_VERSION = app_version()
 LOCAL_MODE = os.environ.get("TGDTA_MAKER_LOCAL") == "1"
 LOCAL_DATA_DIR = (Path(os.environ["TGDTA_MAKER_DATA_DIR"]).expanduser()
                   if LOCAL_MODE and os.environ.get("TGDTA_MAKER_DATA_DIR") else None)
@@ -446,6 +468,14 @@ for i, name in enumerate(names):
 for _error in read_errors:
     st.error(ui("読み込めません — ", "Cannot read — ") + _error)
 for i, m in measurements.items():
+    _excluded = (m.read_report or {}).get("excluded") or []
+    if _excluded:
+        st.warning(ui("{n}: 数値でない値（空欄・NaN・文字）や列の数が違う {k} 行を除いて読みました（行 {lines}）。値の補間はしていません。"
+                      "詳しくは「解析の信頼性（QC）」タブ。",
+                      "{n}: {k} rows with a value that is not a number (empty, NaN, text) or another number of cells were "
+                      "left out (lines {lines}). Nothing was interpolated. See the 'Reliability (QC)' tab.")
+                   .format(n=names[i], k=len(_excluded), lines=", ".join(str(e["line"]) for e in _excluded[:10])
+                           + (" …" if len(_excluded) > 10 else "")))
     if "mes_time_assumed" in m.notes:
         st.warning(ui("{n}: 測定時間の範囲が見つからないため、1 秒ごとの記録として時間を作りました。横軸を時間にするときは確かめてください。",
                       "{n}: the time range was not found, so 1 s sampling is assumed. Check it before plotting against time.")
@@ -459,6 +489,30 @@ for i in measurements:
     st.session_state.setdefault(f"dtaoff_{i}", 0.0)
 if st.session_state.pop("_recolor", False) or any(f"color_{i}" not in st.session_state for i in measurements):
     _apply_palette()
+
+
+
+def smoothing_caption(points, minimum=0):
+    """The smoothing window as time and temperature for each sample: points alone compare badly between
+    instruments recording at different intervals."""
+    parts = []
+    for i, m in measurements.items():
+        t, T = m.time_min(), m.column("temp")
+        if t is None or T is None or len(t) < 5:
+            continue
+        span = smoothing_span(points, t, heating_rate(t, T), minimum)
+        if span is None:
+            return
+        parts.append((os.path.splitext(names[i])[0], span))
+    if not parts:
+        return
+    texts = [ui("{p} 点 ≈ {m:.2f} min ≈ {K:.1f} K", "{p} points ≈ {m:.2f} min ≈ {K:.1f} K").format(
+        p=s["points"], m=s["min"], K=s["K"]) for _, s in parts]
+    if len(set(texts)) == 1:
+        st.sidebar.caption(ui("窓の幅: ", "Window: ") + texts[0])
+    else:
+        st.sidebar.caption(ui("窓の幅: ", "Window: ") + "; ".join(f"{n}: {x}" for (n, _), x in zip(parts, texts)))
+
 
 # ===== サイドバー：グラフの設定 =====
 st.sidebar.header(ui("⚙️ グラフの設定", "⚙️ Graph settings"))
@@ -555,6 +609,7 @@ st.sidebar.checkbox(ui("基準の温度で 0 にそろえる", "Zero at a refere
 if st.session_state["tg_ref_on"]:
     st.sidebar.number_input(ui("基準の温度 (°C)", "Reference temperature (°C)"), step=10.0, format="%.1f", key="tg_ref_temp")
 st.sidebar.number_input(ui("TG の平滑化（点数、0 = なし）", "TG smoothing (points, 0 = none)"), 0, 201, step=2, key="tg_smooth")
+smoothing_caption(st.session_state["tg_smooth"])
 if "tg" in signals_shown:
     _tr = st.sidebar.columns(2)
     _tr[0].text_input(ui("TG 縦軸の最小", "TG axis min"), key="y_tg_lo", placeholder=ui("自動", "auto"),
@@ -579,6 +634,7 @@ st.sidebar.checkbox(ui("始点を 0 にそろえる", "Start at 0"), key="dta_ze
                     help=ui("各試料の DTA から描く区間の最初の値を引きます。重ねるときの縦の位置は試料パネルの「DTA の縦の位置」で。",
                             "Subtracts each curve's first value. Shift curves with 'DTA offset' in the sample panel."))
 st.sidebar.number_input(ui("DTA の平滑化（点数、0 = なし）", "DTA smoothing (points, 0 = none)"), 0, 201, step=2, key="dta_smooth")
+smoothing_caption(st.session_state["dta_smooth"])
 if "dtg" in signals_shown:
     st.sidebar.subheader("DTG")
     st.sidebar.radio(ui("DTG の単位", "DTG per"), ["per_min", "per_K"], key="dtg_basis", horizontal=True,
@@ -587,6 +643,7 @@ if "dtg" in signals_shown:
                             help=ui("微分はてんびんの雑音を強めるので、Savitzky–Golay で平滑化してから微分します。0.05 min 間隔なら 31 点 ≈ 1.5 min。",
                                     "Differentiation amplifies balance noise, so TG is smoothed (Savitzky–Golay) first. "
                                     "At 0.05 min spacing, 31 points ≈ 1.5 min."))
+    smoothing_caption(st.session_state["dtg_smooth"], minimum=5)
 
 with st.sidebar.expander(ui("DTA・DTG の縦軸の範囲（空欄 = 自動）", "DTA / DTG y ranges (empty = automatic)")):
     for _s in [s for s in signals_shown if s != "tg"]:
@@ -771,7 +828,7 @@ def number_or_none(text):
 
 
 state = st.session_state
-time_ranges, processed, notes = {}, {}, []
+time_ranges, processed, notes, process_kwargs = {}, {}, [], {}
 for i, m in measurements.items():
     t, T = m.time_min(), m.column("temp")
     if state["segment"] == "heating" and t is not None and T is not None:
@@ -780,13 +837,14 @@ for i, m in measurements.items():
         time_ranges[i] = tuple(state["time_range"])
     else:
         time_ranges[i] = None
+    process_kwargs[i] = dict(
+        time_range=time_ranges[i], tg_mode=state["tg_mode"], mass_mg=float(state.get(f"mass_{i}") or 0) or None,
+        tg_ref_temp=state["tg_ref_temp"] if state["tg_ref_on"] else None, dta_per_mass=state["dta_per_mass"] and not state["dta_au"],
+        dta_flip=bool(state["dta_exo_positive"]) != bool(state["exo_up"]), dta_zero=state["dta_zero"],
+        dta_smooth=state["dta_smooth"], tg_smooth=state["tg_smooth"], dtg_smooth=state["dtg_smooth"],
+        dtg_basis=state["dtg_basis"])
     try:
-        processed[i] = process(
-            m, time_range=time_ranges[i], tg_mode=state["tg_mode"], mass_mg=float(state.get(f"mass_{i}") or 0) or None,
-            tg_ref_temp=state["tg_ref_temp"] if state["tg_ref_on"] else None, dta_per_mass=state["dta_per_mass"] and not state["dta_au"],
-            dta_flip=bool(state["dta_exo_positive"]) != bool(state["exo_up"]), dta_zero=state["dta_zero"],
-            dta_smooth=state["dta_smooth"], tg_smooth=state["tg_smooth"], dtg_smooth=state["dtg_smooth"],
-            dtg_basis=state["dtg_basis"])
+        processed[i] = process(m, **process_kwargs[i])
     except TGDTAParseError as exc:
         st.error(f"{names[i]}: {exc}")
 
@@ -799,6 +857,7 @@ for _s, _slot in _label_widgets.items():
                      placeholder=_auto, help=_axis_help)
 
 # ===== メイン：試料パネル =====
+qc_slots = {}                     # the QC mark of each sample, filled once the checks are made
 show_panel = st.toggle(ui("試料の設定パネルを表示", "Show the sample panel"), key="show_panel")
 if not measurements:
     st.info(ui("左のサイドバーから TG-DTA のファイル（CSV / TXT・リガクの .MES / .xlsx）をアップロードしてください。",
@@ -855,6 +914,7 @@ else:
                             r=p.rate, n=len(p.t)) + (ui(" · 描く区間 {a:.1f}–{b:.1f} min（{Ta:.0f}–{Tb:.0f} °C）",
                                                          " · drawn {a:.1f}–{b:.1f} min ({Ta:.0f}–{Tb:.0f} °C)").format(
                             a=p.t[0], b=p.t[-1], Ta=p.T[0], Tb=p.T[-1])))
+                        qc_slots[i] = st.empty()
                     with st.popover(ui("列の対応", "Columns"), **FULL_WIDTH["popover"]):
                         options = [-1] + list(range(len(m.columns)))
                         for s in SIGNALS:
@@ -864,6 +924,68 @@ else:
                             st.selectbox(SIGNAL_NAMES[s], options, key=key,
                                          format_func=lambda k, cols=m.columns: ui("（なし）", "(none)") if k < 0 else cols[k])
                         st.caption(ui("単位: ", "Units: ") + ", ".join(f"{s} = {u}" for s, u in m.units.items()))
+
+# ===== 解析の信頼性（QC）の表示と出力 =====
+QC_STATUS_ORDER = ("FAIL", "WARNING", "NOT EVALUATED", "CAUTION", "PASS")
+
+
+def qc_report(curves, qc_results, rows):
+    """The QC report of the curves shown: JSON and CSV (tgdta_qc.build_report)."""
+    settings = {k: v for k, v in st.session_state.items() if is_setting_key(k) and k != "lang_radio"}
+    samples = [{"label": plain(c.label), "file": c.key, "raw": st.session_state["_files"][c.key],
+                "measurement": measurements[names.index(c.key)], "row": row, "result": qc_results[c.key]}
+               for c, row in zip(curves, rows)]
+    return build_report(APP_VERSION, settings, samples, datetime.now().astimezone().isoformat(timespec="seconds"))
+
+
+def show_qc_tab(curves, qc_results, rows):
+    st.caption(ui("図と数値に使った値が、どこまで信頼できるかの判定です。データや値は一切変えていません。"
+                  "PASS（基準を満たす）・CAUTION（理由を踏まえて使える）・WARNING（誤りの可能性・確認が必要）・"
+                  "FAIL（そのままでは使えない）・NOT EVALUATED（評価できない、理由つき）。試料の総合は最も悪い判定です。",
+                  "How far the values used in the figure and the table can be trusted. Nothing in the data or the values is "
+                  "changed. PASS (meets the criterion), CAUTION (usable with the reason in mind), WARNING (may be wrong: check), "
+                  "FAIL (not usable as it is), NOT EVALUATED (could not be checked; the reason says why). A sample's overall "
+                  "status is its worst check."))
+    st.caption(ui("※ 頑健性（{a:g}・{b:g} K）、平滑化の影響（{c:g} K）、サンプリング間隔（{d:g}）、発熱直後の吸熱（半値幅の {e:g} 倍）の"
+                  "閾値は暫定値で、規格の値ではありません。S/N の 3・10 は検出限界・定量限界の慣例（IUPAC・ICH Q2）です。",
+                  "* The thresholds for robustness ({a:g}, {b:g} K), smoothing ({c:g} K), sampling ({d:g}) and endotherms after "
+                  "an exotherm ({e:g} half-widths) are provisional, not values from a standard. S/N 3 and 10 follow the "
+                  "detection and quantitation limits (IUPAC, ICH Q2).").format(
+        a=THRESHOLDS["robust_pass_K"], b=THRESHOLDS["robust_caution_K"], c=THRESHOLDS["smoothing_pass_K"],
+        d=THRESHOLDS["sampling_ratio"], e=THRESHOLDS["after_exo_widths"]))
+    headers = {"item": ui("項目", "Item"), "target": ui("対象", "Target"), "value": ui("値", "Value"),
+               "criterion": ui("判定基準", "Criterion"), "status": ui("判定", "Status"), "reason": ui("理由", "Reason"),
+               "action": ui("確認してほしいこと", "What to check")}
+    for c in curves:
+        result = qc_results[c.key]
+        checks = result["checks"]
+        counts = {s: sum(1 for chk in checks if chk.status == s) for s in QC_STATUS_ORDER}
+        summary = " · ".join(f"{QC_ICONS[s]} {s} {n}" for s, n in counts.items() if n)
+        st.markdown(f"**{plain(c.label)}** — {QC_ICONS[result['overall']]} **{result['overall']}**  \n{summary}")
+        with st.expander(ui("詳細", "Details"), expanded=result["overall"] in ("FAIL", "WARNING")):
+            ordered = sorted(checks, key=lambda chk: QC_STATUS_ORDER.index(chk.status))
+            table = pd.DataFrame([{headers[k]: (f"{QC_ICONS[v]} {v}" if k == "status" else v)
+                                   for k, v in check_texts(chk, _lang).items()} for chk in ordered])
+            st.dataframe(table, hide_index=True, height=min(36 * (len(table) + 1) + 4, 640), **FULL_WIDTH["dataframe"])
+            st.markdown(ui("**実施した自動処理**", "**Done automatically**"))
+            st.markdown("\n".join(f"- {qc_text(k, 'text', _lang, prm)}" for k, prm in result["processing"]))
+            unevaluated = [chk for chk in checks if chk.status == "NOT EVALUATED"]
+            st.markdown(ui("**未評価の項目**", "**Not evaluated**"))
+            if unevaluated:
+                st.markdown("\n".join(f"- {t['item']}{(' · ' + t['target']) if t['target'] else ''}: {t['reason']}"
+                                       for t in (check_texts(chk, _lang) for chk in unevaluated)))
+            else:
+                st.caption(ui("ありません。", "None."))
+    json_bytes, csv_bytes = qc_report(curves, qc_results, rows)
+    _qc = st.columns(2)
+    _qc[0].download_button(ui("📋 QC レポートを保存 (JSON)", "📋 Save the QC report (JSON)"), json_bytes,
+                           file_name="tgdta_qc_report.json", mime="application/json", **FULL_WIDTH["download_button"])
+    _qc[1].download_button(ui("📋 解析条件と QC を保存 (CSV)", "📋 Save conditions and QC (CSV)"), csv_bytes,
+                           file_name="tgdta_qc_conditions.csv", mime="text/csv", **FULL_WIDTH["download_button"])
+    st.caption(ui("レポートには、アプリの版・ファイルの SHA-256・すべての設定・自動処理・判定とその根拠が入ります（英語）。",
+                  "The report holds the app version, each file's SHA-256, every setting, the automatic steps and each check "
+                  "with its reason (in English)."))
+
 
 # ===== 図 / Figure =====
 if measurements and col_graph is not None:
@@ -914,6 +1036,33 @@ if measurements and col_graph is not None:
     no_mass = [plain(c.label) for c in curves if "no_mass" in c.data.notes and state["tg_mode"] != "change_mg"]
     no_mass_dta = [plain(c.label) for c in curves if "no_mass_dta" in c.data.notes]
     ref_out = [plain(c.label) for c in curves if "ref_out_of_range" in c.data.notes]
+    not_heating = [plain(c.label) for c in curves if not temperature_based_ok(c.data)]
+    ref_not = [plain(c.label) for c in curves if "ref_not_evaluated" in c.data.notes]
+
+    # ===== 解析の信頼性（QC） =====
+    # The checks change nothing: they look at the data and the constructions the figure and the table use.
+    index_of = {names[i]: i for i in processed}
+    qc_results = {}
+    for c in curves:
+        i = index_of[c.key]
+        raw_p = c.data
+        if int(state["dta_smooth"] or 0) > 1 and c.data.dta is not None:
+            raw_p = process(measurements[i], **{**process_kwargs[i], "dta_smooth": 0})
+        c_raw = Curve(c.label, c.color, raw_p, dta_offset=c.dta_offset, key=c.key)
+        _mass = process_kwargs[i]["mass_mg"]
+        _file_mass = measurements[i].mass_mg
+        _source = "file" if _file_mass and _mass and abs(_mass - _file_mass) < 1e-9 else "entered"
+        qc_results[c.key] = evaluate(measurements[i], c, c_raw, opts, mass_mg=_mass, mass_source=_source,
+                                     tg_mode=state["tg_mode"], dta_smooth=int(state["dta_smooth"] or 0))
+        qc_results[c.key]["processing"] = processing_steps(
+            measurements[i], c.data, segment=state["segment"], time_range=time_ranges[i], mass_mg=_mass, mass_source=_source,
+            tg_ref_temp=process_kwargs[i]["tg_ref_temp"], dta_flip=process_kwargs[i]["dta_flip"],
+            dta_zero=process_kwargs[i]["dta_zero"], dta_per_mass=process_kwargs[i]["dta_per_mass"],
+            tg_smooth=state["tg_smooth"], dta_smooth=state["dta_smooth"], dtg_smooth=state["dtg_smooth"])
+    for i, slot in qc_slots.items():
+        result = qc_results.get(names[i])
+        if result is not None:
+            slot.caption(ui("QC（解析の信頼性）: ", "QC (reliability): ") + f"{QC_ICONS[result['overall']]} {result['overall']}")
 
     with col_graph:
         if state["show_tg"] and "dta" in signals_shown:
@@ -921,7 +1070,8 @@ if measurements and col_graph is not None:
                 st.info(ui("Tg を求めるには、サイドバーの「探す温度範囲」に 900-1010 のように入れてください。",
                            "To find Tg, enter a search range such as 900-1010 in the sidebar."))
             else:
-                no_tg = [plain(c.label) for c in curves if c.data.dta is not None and glass_info(c, opts) is None]
+                no_tg = [plain(c.label) for c in curves if c.data.dta is not None and temperature_based_ok(c.data)
+                         and glass_info(c, opts) is None]
                 if no_tg:
                     st.info(ui("{lo:g}–{hi:g} °C にはっきりした段がないため、Tg を出していません: ",
                                "No clear step in {lo:g}–{hi:g} °C, so no Tg for: ").format(lo=opts.tg_range[0], hi=opts.tg_range[1])
@@ -935,12 +1085,29 @@ if measurements and col_graph is not None:
         if ref_out:
             st.warning(ui("基準の温度が描く区間の外なので、最初の点を基準にしました: ", "The reference temperature is outside the drawn part; "
                           "the first point is used: ") + ", ".join(ref_out))
+        if not_heating:
+            st.warning(ui("描く区間が冷却または保持を含み、1 つの温度が 1 点に決まらないため、温度で読む値（Tp・Tx・Tg・質量変化）を"
+                          "出していません（曲線はそのまま描いています）: ",
+                          "The drawn part includes cooling or a hold, so a temperature does not pick one point: values read at a "
+                          "temperature (Tp, Tx, Tg, mass change) are not given (the curves are drawn as they are): ")
+                       + ", ".join(not_heating) + ui("。「描く区間」を「昇温部だけ」にするか、時間で区間を指定すると出ます。",
+                                                     ". Set 'Part of the run' to the heating ramp, or choose a time range, to get them."))
+        if ref_not:
+            st.warning(ui("区間が冷却または保持を含み、基準の温度が 1 点に決まらないため、最初の点を TG の基準にしました: ",
+                          "The part includes cooling or a hold, so the reference temperature does not pick one point; the first "
+                          "point is the TG reference: ") + ", ".join(ref_not))
+        _missing_mass = [(plain(c.label), lo, hi, reason) for c in curves for lo, hi, reason in mass_issues(c, opts)
+                         if reason == "outside"]
+        if _missing_mass:
+            st.info(ui("質量変化を書いていない範囲があります（範囲の端が描く区間の温度の外）: ",
+                       "Some mass-change ranges have no label (an end lies outside the drawn temperatures): ")
+                    + "; ".join(f"{n} {lo:g}–{hi:g} °C" for n, lo, hi, _ in _missing_mass))
         if not curves:
             st.warning(ui("表示する試料がありません。", "No sample is shown."))
         else:
-            tab_live, tab_export, tab_numbers, tab_adjust = st.tabs([
+            tab_live, tab_export, tab_numbers, tab_adjust, tab_qc = st.tabs([
                 ui("インタラクティブ", "Interactive"), ui("出力プレビュー", "Export preview"), ui("数値の一覧", "Numbers"),
-                ui("Tx・Tg の接線を直す", "Adjust Tx / Tg tangents")])
+                ui("Tx・Tg の接線を直す", "Adjust Tx / Tg tangents"), ui("解析の信頼性（QC）", "Reliability (QC)")])
             fig, render_notes = render_mpl(curves, opts, plot_style, state["tg_mode"])
             # With automatic margins the figure carries the margins fitted to its labels: export with those.
             fig_style = getattr(fig, "tgdta_style", plot_style)
@@ -1002,7 +1169,11 @@ if measurements and col_graph is not None:
             with tab_adjust:
                 features = {c.key: editable_features(c, opts) for c in curves if c.data.dta is not None}
                 features = {k: v for k, v in features.items() if v}
-                if not features:
+                if not features and not_heating:
+                    st.info(ui("描く区間が冷却または保持を含むため、Tx・Tg を求めていません。「描く区間」を「昇温部だけ」にしてください。",
+                               "Tx and Tg are not evaluated because the drawn part includes cooling or a hold. Set 'Part of the "
+                               "run' to the heating ramp."))
+                elif not features:
                     st.info(ui("サイドバー「DTA のピーク・Tg」で、「ピークの温度を書く」→「補外開始温度（Tx）」か、「ガラス転移温度 Tg を求める」を"
                                "オンにすると、ここで接線とベースラインを引き直せます。",
                                "Turn on 'Label peak temperatures' → 'Extrapolated onset (Tx)' or 'Find the glass transition Tg' under "
@@ -1070,6 +1241,13 @@ if measurements and col_graph is not None:
                     _bc[1].button(ui("この試料の手動の線をすべて消す", "Clear all hand-drawn lines of this sample"),
                                   on_click=_reset, args=(sample_key,), disabled=not manual_ids, **FULL_WIDTH["button"])
 
+            with tab_qc:
+                show_qc_tab(curves, qc_results, rows)
+            _flagged = [plain(c.label) for c in curves if qc_results[c.key]["overall"] in ("WARNING", "FAIL")]
+            if _flagged:
+                st.sidebar.warning(ui("QC で WARNING・FAIL の試料があります（「解析の信頼性（QC）」タブ）: ",
+                                      "Samples with WARNING or FAIL in the QC (see the 'Reliability (QC)' tab): ")
+                                   + ", ".join(_flagged))
             st.sidebar.download_button(ui("📥 PDF として保存", "📥 Save as PDF"), pdf_bytes, file_name="tgdta_result.pdf",
                                        mime="application/pdf", **FULL_WIDTH["download_button"])
             st.sidebar.download_button(ui("📥 SVG として保存", "📥 Save as SVG"), svg_bytes, file_name="tgdta_result.svg",

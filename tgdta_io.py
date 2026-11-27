@@ -47,6 +47,9 @@ class Measurement:
     mass_mg: float | None = None          # sample mass written in the file (Rigaku: "Weight"), if any
     source: str = "text"                  # text | xlsx | rigaku-mes
     notes: list[str] = field(default_factory=list)
+    # What reading left out: {"rows", "excluded": [{"line", "reason", "detail"}], "first_line", "last_line",
+    # "footer_lines", "sheet"} (see _table_from_lines).
+    read_report: dict = field(default_factory=dict)
 
     def column(self, signal: str) -> np.ndarray | None:
         index = self.mapping.get(signal)
@@ -146,13 +149,22 @@ _TAG = re.compile(r"#[A-Za-z]{1,4}$")          # Rigaku TPASCII row tags: #GD (d
 _WEIGHT = re.compile(r"weight\s*[:：]?[\s,\t]*([0-9]+(?:\.[0-9]+)?)\s*mg", re.IGNORECASE)
 
 
-def _table_from_lines(lines: list[str]) -> tuple[list[str], np.ndarray]:
-    """The numeric table of a text export, with the column names of the header line above it."""
+def _table_from_lines(lines: list[str], numbers: list[int] | None = None) -> tuple[list[str], np.ndarray, dict]:
+    """The numeric table of a text export, with the column names of the header line above it, and a
+    report of what was left out.
+
+    The table runs from the first to the last numeric row of its width (the width of the longest
+    unbroken run of numeric rows, at least 5 rows). Lines inside it that are not such a row (a cell
+    that is empty, 'NaN' or text, or a row with another number of cells) are left out whole and
+    listed in the report with their line number; nothing is filled in. Lines after the last row
+    (a footer) are counted. ``numbers`` gives the line number of each line (default 1, 2, …).
+    """
+    numbers = list(numbers) if numbers is not None else list(range(1, len(lines) + 1))
     sample = "\n".join(lines[:60])
     counts = {d: sample.count(d) for d in (",", "\t", ";")}
     delimiter = max(counts, key=counts.get) if max(counts.values()) else None
-    rows, header = [], None
-    for line in lines:
+    parsed = []                                     # (line number, fields, all numeric)
+    for number, line in zip(numbers, lines):
         fields = [f.strip() for f in _split(line, delimiter)]
         while fields and not fields[-1]:          # the trailing comma of the export
             fields.pop()
@@ -160,20 +172,43 @@ def _table_from_lines(lines: list[str]) -> tuple[list[str], np.ndarray]:
             fields.pop(0)                         # Rigaku's '#GD' tag and an empty first cell
         if not fields:
             continue
-        numeric = [_is_number(f) for f in fields]
-        if len(fields) >= 2 and all(numeric):
-            rows.append([float(f) for f in fields])
-        elif rows:
-            break                                   # a footer after the data
-        elif len(fields) >= 2 and not any(numeric):
-            header = fields
-    if len(rows) < 5:
+        parsed.append((number, fields, len(fields) >= 2 and all(_is_number(f) for f in fields)))
+    # The width of the table: that of the longest unbroken run of numeric rows.
+    best_width, best_run, run_width, run = None, 0, None, 0
+    for _, fields, numeric in parsed:
+        if numeric and len(fields) == run_width:
+            run += 1
+        elif numeric:
+            run_width, run = len(fields), 1
+        else:
+            run_width, run = None, 0
+        if run > best_run or (run == best_run and run_width is not None and best_width is not None and run_width > best_width):
+            best_width, best_run = run_width, run
+    if best_run < 5:
         raise TGDTAParseError("No numeric table with at least 5 rows was found.")
-    width = max(len(r) for r in rows)
-    rows = [r for r in rows if len(r) == width]
+    width = best_width
+    inside = [k for k, (_, fields, numeric) in enumerate(parsed) if numeric and len(fields) == width]
+    first, last = inside[0], inside[-1]
+    header = None
+    for _, fields, numeric in parsed[:first]:
+        if len(fields) >= 2 and not any(_is_number(f) for f in fields):
+            header = fields
+    rows, excluded = [], []
+    for number, fields, numeric in parsed[first:last + 1]:
+        if numeric and len(fields) == width:
+            rows.append([float(f) for f in fields])
+            continue
+        bad = [j for j, f in enumerate(fields) if not _is_number(f)]
+        if len(fields) != width:
+            reason, detail = "width", f"{len(fields)} cells, {width} expected"
+        else:
+            reason, detail = "not_numeric", f"column {bad[0] + 1}: {fields[bad[0]][:20]!r}" if bad else ""
+        excluded.append({"line": int(number), "reason": reason, "detail": detail})
     columns = list(header[:width]) if header and len(header) >= width else [f"column {i + 1}" for i in range(width)]
     columns += [f"column {i + 1}" for i in range(len(columns), width)]
-    return columns, np.asarray(rows, dtype=float)
+    report = {"rows": len(rows), "excluded": excluded, "first_line": int(parsed[first][0]),
+              "last_line": int(parsed[last][0]), "footer_lines": len(parsed) - last - 1}
+    return columns, np.asarray(rows, dtype=float), report
 
 
 def _mass_from_text(lines: list[str]) -> float | None:
@@ -186,8 +221,9 @@ def _mass_from_text(lines: list[str]) -> float | None:
     return None
 
 
-def _xlsx_sheets(raw: bytes) -> list[list[str]]:
-    """Every sheet of a workbook as tab-separated lines (Rigaku's Excel export: Sheet1 conditions, Sheet2 data)."""
+def _xlsx_sheets(raw: bytes) -> list[tuple[str, list[str], list[int]]]:
+    """Every sheet of a workbook as (name, tab-separated lines, row numbers) (Rigaku's Excel export: Sheet1
+    conditions, Sheet2 data). Empty rows are skipped; the row numbers are those of the sheet."""
     try:
         import openpyxl
     except ImportError as exc:             # pragma: no cover - listed in requirements.txt
@@ -201,12 +237,13 @@ def _xlsx_sheets(raw: bytes) -> list[list[str]]:
         raise TGDTAParseError("This .xlsx file cannot be opened.") from exc
     sheets = []
     for sheet in book.worksheets:
-        lines = []
-        for row in sheet.iter_rows(values_only=True):
+        lines, numbers = [], []
+        for number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
             cells = ["" if v is None else (repr(v) if isinstance(v, float) else str(v)).replace("\t", " ") for v in row]
             if any(c.strip() for c in cells):
                 lines.append("\t".join(cells))
-        sheets.append(lines)
+                numbers.append(number)
+        sheets.append((sheet.title, lines, numbers))
     book.close()
     return sheets
 
@@ -306,28 +343,31 @@ def read_measurement(raw: bytes, name: str = "", mapping: dict | None = None) ->
     if raw.startswith(MES_SIGNATURE):
         source = "rigaku-mes"
         columns, data, mass, notes = _read_mes(raw)
+        report = {"rows": int(data.shape[0]), "excluded": [], "first_line": None, "last_line": None, "footer_lines": 0}
     elif raw[:2] == b"PK":
         source = "xlsx"
         sheets = _xlsx_sheets(raw)
         table = None
-        for lines in sheets:
+        for title, lines, numbers in sheets:
             try:
-                table = _table_from_lines(lines)
+                table = _table_from_lines(lines, numbers)
+                table[2]["sheet"] = title
                 break
             except TGDTAParseError:
                 continue
         if table is None:
             raise TGDTAParseError("No numeric table with at least 5 rows was found in the workbook.")
-        columns, data = table
-        mass = next((m for m in (_mass_from_text(lines) for lines in sheets) if m), None)
+        columns, data, report = table
+        mass = next((m for m in (_mass_from_text(lines) for _, lines, _ in sheets) if m), None)
     else:
         source = "text"
         text = decode_text(raw)
-        lines = [line.rstrip("\r\n") for line in text.splitlines()]
-        lines = [line for line in lines if line.strip()]
-        if not lines:
+        numbered = [(k, line.rstrip("\r\n")) for k, line in enumerate(text.splitlines(), start=1)]
+        numbered = [(k, line) for k, line in numbered if line.strip()]
+        if not numbered:
             raise TGDTAParseError("The file is empty.")
-        columns, data = _table_from_lines(lines)
+        lines = [line for _, line in numbered]
+        columns, data, report = _table_from_lines(lines, [k for k, _ in numbered])
         mass = _mass_from_text(lines)
     width = data.shape[1]
     auto = guess_mapping(columns)
@@ -338,7 +378,7 @@ def read_measurement(raw: bytes, name: str = "", mapping: dict | None = None) ->
                 auto[signal] = value if isinstance(value, int) and 0 <= value < width else None
     units = {signal: _unit_of(signal, columns[i]) for signal, i in auto.items() if i is not None}
     return Measurement(name=name, columns=columns, data=data, mapping=auto, units=units, mass_mg=mass,
-                       source=source, notes=notes)
+                       source=source, notes=notes, read_report=report)
 
 
 # ------------------------------------------------------------------------------------------------ processing
@@ -385,6 +425,45 @@ def heating_segment(t_min: np.ndarray, temp: np.ndarray, fraction: float = 0.9) 
     return float(t_min[0]), float(t_min[fast[-1]])
 
 
+# A part of the run is a heating run when its temperature never falls more than COOLING_TOLERANCE_K below
+# the highest value reached so far, and it does not go on for more than HOLD_TOLERANCE_MIN after the last
+# point still heating at half the programmed rate (the hold at the top temperature).
+COOLING_TOLERANCE_K = 2.0
+HOLD_TOLERANCE_MIN = 1.0
+
+
+def temperature_profile(t_min: np.ndarray, temp: np.ndarray, rate: float) -> dict:
+    """Whether temperature rises through this part of the run, so that a temperature picks one point.
+
+    status: 'heating', 'cooling' (falls more than 2 K below its running maximum) or 'hold' (goes on more
+    than 1 min after the ramp, or never heats). Values read at a temperature (peak and onset temperatures,
+    Tg, mass change between temperatures) are only meaningful for 'heating'.
+    """
+    T = np.asarray(temp, float)
+    drop = float(np.max(np.maximum.accumulate(T) - T)) if len(T) else 0.0
+    out = {"status": "heating", "drop_K": drop, "after_ramp_min": 0.0}
+    if drop > COOLING_TOLERANCE_K:
+        out["status"] = "cooling"
+        return out
+    if len(T) == 0 or float(T.max() - T.min()) <= COOLING_TOLERANCE_K:
+        out["status"] = "hold"                  # no temperature range at all
+        return out
+    if t_min is None or not math.isfinite(rate) or rate <= 0 or len(T) < 5:
+        return out
+    slope = np.gradient(smooth(T, 9), t_min)
+    fast = np.nonzero(slope >= 0.5 * rate)[0]
+    after = float(t_min[-1] - t_min[fast[-1]]) if fast.size else float(t_min[-1] - t_min[0])
+    out["after_ramp_min"] = after
+    if fast.size == 0 or after > HOLD_TOLERANCE_MIN:
+        out["status"] = "hold"
+    return out
+
+
+def temperature_based_ok(p) -> bool:
+    """True when values read at a temperature can be given for this processed run (a heating run)."""
+    return (getattr(p, "profile", None) or {}).get("status", "heating") == "heating"
+
+
 @dataclass
 class Processed:
     """The curves of one measurement, ready to draw (all arrays the same length)."""
@@ -398,6 +477,7 @@ class Processed:
     dtg_unit: str
     rate: float              # K/min
     notes: list[str] = field(default_factory=list)
+    profile: dict = field(default_factory=dict)   # temperature_profile of the drawn part
 
 
 TG_MODES = ("change_pct", "residual_pct", "change_mg")
@@ -443,16 +523,21 @@ def process(m: Measurement, *, time_range=None, tg_mode="change_pct", mass_mg=No
     if keep.sum() < 3:
         raise TGDTAParseError("Fewer than 3 points in the chosen time range.")
     t, T = t[keep], T[keep]
+    profile = temperature_profile(None if "no_time" in notes else t, T, rate)
 
     tg = dtg = None
     tg_unit = dtg_unit = ""
     if tg_raw is not None:
         y = smooth(tg_raw[keep], tg_smooth)
         in_pct = m.units.get("tg") == "%"
-        ref = y[0] if tg_ref_temp is None else tg_at(T, y, float(tg_ref_temp))
-        if not math.isfinite(ref):
-            ref = y[0]
-            notes.append("ref_out_of_range")
+        if tg_ref_temp is not None and profile["status"] != "heating":
+            ref = y[0]                      # a temperature does not pick one point when it cools or holds
+            notes.append("ref_not_evaluated")
+        else:
+            ref = y[0] if tg_ref_temp is None else tg_at(T, y, float(tg_ref_temp))
+            if not math.isfinite(ref):
+                ref = y[0]
+                notes.append("ref_out_of_range")
         delta = y - ref
         mode = tg_mode if tg_mode in TG_MODES else "change_pct"
         if mode == "change_mg" and in_pct:
@@ -496,7 +581,7 @@ def process(m: Measurement, *, time_range=None, tg_mode="change_pct", mass_mg=No
                 notes.append("no_mass_dta")
         dta, dta_unit = y, unit
     return Processed(t=t, T=T, tg=tg, dta=dta, dtg=dtg, tg_unit=tg_unit, dta_unit=dta_unit,
-                     dtg_unit=dtg_unit, rate=rate, notes=notes)
+                     dtg_unit=dtg_unit, rate=rate, notes=notes, profile=profile)
 
 
 def dta_peaks(x: np.ndarray, y: np.ndarray, prominence: float = 0.1, kind: str = "both",
@@ -575,13 +660,16 @@ def processed_table(name: str, p: Processed) -> str:
     return out.getvalue()
 
 
-def peak_onset(x: np.ndarray, y: np.ndarray, p: int, kind: str = "exo", window: float | None = None) -> dict | None:
+def peak_onset(x: np.ndarray, y: np.ndarray, p: int, kind: str = "exo", window: float | None = None,
+               foot_height: float = 0.9, baseline_widths: tuple[float, float] = (5.0, 2.0)) -> dict | None:
     """Extrapolated onset of a DTA peak (Tx of a crystallization peak): where the tangent at the steepest
     point of the leading edge crosses the baseline extrapolated from before the peak (ISO 11357 / ASTM E794).
 
     ``x`` must increase (a heating run); ``kind`` 'exo' for a maximum, 'endo' for a minimum.
     ``window`` (x units) bounds the search around the peak; by default 10 % of the x span.
     Returns the onset and the construction lines, or None when the peak has no clear leading edge.
+    ``foot_height`` and ``baseline_widths`` set the construction (defaults: the foot where the edge has
+    risen 10 %, the baseline 5 to 2 foot-to-peak widths before it); the QC check varies them.
     """
     from scipy.signal import peak_prominences, peak_widths
     x, y = np.asarray(x, float), np.asarray(y, float)
@@ -597,8 +685,8 @@ def peak_onset(x: np.ndarray, y: np.ndarray, p: int, kind: str = "exo", window: 
     prom = peak_prominences(ys, [p], wlen=wlen)
     if prom[0][0] <= 0:
         return None
-    # Foot of the peak: where the leading edge has risen 10 % of the (local) peak height.
-    foot_i = peak_widths(ys, [p], rel_height=0.9, prominence_data=prom)[2][0]
+    # Foot of the peak: where the leading edge has risen 10 % (by default) of the (local) peak height.
+    foot_i = peak_widths(ys, [p], rel_height=foot_height, prominence_data=prom)[2][0]
     foot = float(np.interp(foot_i, np.arange(len(x)), x))
     width = max(float(x[p]) - foot, 3 * step)
     # Leading edge: the steepest point between the foot and the peak.
@@ -611,9 +699,10 @@ def peak_onset(x: np.ndarray, y: np.ndarray, p: int, kind: str = "exo", window: 
     m = float(slope[i])
     if m <= 0:
         return None
-    # Baseline: straight line on the flat part well before the foot (5 to 2 foot-to-peak widths before it),
+    # Baseline: straight line on the flat part well before the foot (by default 5 to 2 foot-to-peak widths before it),
     # clear of the slow rise that often precedes a crystallization peak.
-    base = (x >= foot - 5 * width) & (x <= foot - 2 * width)
+    far, near = baseline_widths
+    base = (x >= foot - far * width) & (x <= foot - near * width)
     if base.sum() < 3:
         return None
     a, b = np.polyfit(x[base], ys[base], 1)

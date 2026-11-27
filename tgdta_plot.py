@@ -25,7 +25,7 @@ from matplotlib.transforms import blended_transform_factory
 
 from figure_style import apply_mpl_style, css_font_stack, font_rcparams, validate_style_settings
 from rich_text import plain, rich, to_html
-from tgdta_io import Processed, dta_peaks, glass_transition, mass_change, peak_onset, tg_at
+from tgdta_io import Processed, dta_peaks, glass_transition, mass_change, peak_onset, temperature_based_ok, tg_at
 
 
 SIGNAL_ORDER = ("tg", "dtg", "dta")
@@ -222,16 +222,13 @@ def _override(c: Curve, opts: PlotOptions, kind: str, T_peak: float | None = Non
     return None
 
 
-def peak_list(c: Curve, opts: PlotOptions):
-    """[(x on the axis, y, temperature, kind, onset)] of the DTA peaks of one curve within the x range.
-
-    ``onset`` is the extrapolated onset (Tx for crystallization): the automatic construction of
-    tgdta_io.peak_onset, or the one adjusted by hand in opts.overrides. It is in °C and drawn units
-    (``T``, ``y``, ``lines``); None when the peak has no clear leading edge.
-    """
+def peak_inputs(c: Curve, opts: PlotOptions):
+    """(indices of the points within the x range, DTA there with exo upward, [(position in it, kind)] of the
+    peaks found): what peak_list works on. None when there is no DTA, too few points, or the part of the
+    run is not a heating run (a temperature would not pick one point)."""
     y = series(c, "dta")
-    if y is None:
-        return []
+    if y is None or not temperature_based_ok(c.data):
+        return None
     x = x_values(c.data, opts)
     mask = np.ones(len(x), bool)
     if opts.x_range:
@@ -239,9 +236,25 @@ def peak_list(c: Curve, opts: PlotOptions):
         mask = (x >= lo) & (x <= hi)
     idx = np.nonzero(mask)[0]
     if idx.size < 5:
-        return []
+        return None
     signed = y[idx] if opts.exo_up else -y[idx]
-    found = dta_peaks(x[idx], signed, opts.peak_prominence, opts.peak_kind, opts.peak_min_distance)
+    return idx, signed, dta_peaks(x[idx], signed, opts.peak_prominence, opts.peak_kind, opts.peak_min_distance)
+
+
+def peak_list(c: Curve, opts: PlotOptions):
+    """[(x on the axis, y, temperature, kind, onset)] of the DTA peaks of one curve within the x range.
+
+    ``onset`` is the extrapolated onset (Tx for crystallization): the automatic construction of
+    tgdta_io.peak_onset, or the one adjusted by hand in opts.overrides. It is in °C and drawn units
+    (``T``, ``y``, ``lines``); None when the peak has no clear leading edge. Empty when the drawn part
+    cools or holds (tgdta_io.temperature_profile): temperatures are then not evaluated.
+    """
+    inputs = peak_inputs(c, opts)
+    if inputs is None:
+        return []
+    idx, signed, found = inputs
+    y = series(c, "dta")
+    x = x_values(c.data, opts)
     out = []
     for k, kind in found:
         onset = None
@@ -269,9 +282,10 @@ def peak_list(c: Curve, opts: PlotOptions):
 
 def glass_info(c: Curve, opts: PlotOptions) -> dict | None:
     """The glass transition of one curve in opts.tg_range (°C): onset (and inflection) temperature and the
-    construction, automatic or adjusted by hand. None when off, or when no clear step is found."""
+    construction, automatic or adjusted by hand. None when off, when no clear step is found, or when the
+    drawn part cools or holds (not evaluated)."""
     y = series(c, "dta")
-    if y is None or not opts.tg_range:
+    if y is None or not opts.tg_range or not temperature_based_ok(c.data):
         return None
     saved = _override(c, opts, "tg")
     if saved:
@@ -344,9 +358,10 @@ def onset_label(T: float, kind: str, opts: PlotOptions) -> str:
 
 
 def mass_list(c: Curve, opts: PlotOptions):
-    """[(x of the label, y, Δ, lo, hi)] of the chosen temperature ranges of one curve."""
+    """[(x of the label, y, Δ, lo, hi)] of the chosen temperature ranges of one curve (mass_issues says why
+    a range is missing)."""
     tg = series(c, "tg")
-    if tg is None:
+    if tg is None or not temperature_based_ok(c.data):
         return []
     out = []
     for lo, hi in opts.mass_ranges:
@@ -362,6 +377,23 @@ def mass_list(c: Curve, opts: PlotOptions):
         ym = float(np.nanmin(tg[inside]) if delta <= 0 else np.nanmax(tg[inside]))
         if math.isfinite(xm) and math.isfinite(ym):
             out.append((xm, ym, delta, lo, hi))
+    return out
+
+
+def mass_issues(c: Curve, opts: PlotOptions) -> list[tuple[float, float, str]]:
+    """[(lo, hi, reason)] of the chosen ranges that get no mass-change label: 'no_tg' (no TG column),
+    'not_heating' (the drawn part cools or holds), 'outside' (an end lies outside the drawn temperatures)."""
+    shown = {(lo, hi) for _, _, _, lo, hi in mass_list(c, opts)}
+    out = []
+    for lo, hi in opts.mass_ranges:
+        if (lo, hi) in shown:
+            continue
+        if series(c, "tg") is None:
+            out.append((lo, hi, "no_tg"))
+        elif not temperature_based_ok(c.data):
+            out.append((lo, hi, "not_heating"))
+        else:
+            out.append((lo, hi, "outside"))
     return out
 
 
